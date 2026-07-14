@@ -1,0 +1,143 @@
+# GoReleaser v2 configuration. Validate with: goreleaser check
+version: 2
+
+project_name: tallyfy
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: tallyfy
+    main: ./cmd/tallyfy
+    binary: tallyfy
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/tallyfy/cli/internal/version.Version={{ .Version }}
+      - -X github.com/tallyfy/cli/internal/version.Commit={{ .Commit }}
+      - -X github.com/tallyfy/cli/internal/version.Date={{ .Date }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    # Deterministic names - the self-updater and docs depend on this pattern:
+    # tallyfy_0.1.0_darwin_arm64.tar.gz / tallyfy_0.1.0_windows_amd64.zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - NOTICE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: git
+  sort: asc
+  groups:
+    - title: "New features"
+      regexp: '^feat(\(.*\))?!?:'
+      order: 0
+    - title: "Bug fixes"
+      regexp: '^fix(\(.*\))?!?:'
+      order: 1
+    - title: "Performance"
+      regexp: '^perf(\(.*\))?!?:'
+      order: 2
+    - title: "Other changes"
+      order: 999
+  filters:
+    exclude:
+      - '^docs(\(.*\))?:'
+      - '^test(\(.*\))?:'
+      - '^chore(\(.*\))?:'
+      - '^ci(\(.*\))?:'
+      - '^style(\(.*\))?:'
+      - '^Merge '
+
+release:
+  github:
+    owner: tallyfy
+    name: cli
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"
+  header: |
+    ## Tallyfy CLI {{ .Tag }}
+
+    Deterministic, scriptable Tallyfy workflow automation for your terminal.
+  footer: |
+    ---
+    ### Install
+
+    **Homebrew (macOS and Linux)**
+    ```sh
+    brew install tallyfy/tap/tallyfy
+    ```
+
+    **Direct download (macOS/Linux)** - verify, extract, run:
+    ```sh
+    curl -fsSLO https://github.com/tallyfy/cli/releases/download/{{ .Tag }}/tallyfy_{{ .Version }}_darwin_arm64.tar.gz
+    curl -fsSLO https://github.com/tallyfy/cli/releases/download/{{ .Tag }}/checksums.txt
+    shasum -a 256 --check --ignore-missing checksums.txt
+    tar -xzf tallyfy_{{ .Version }}_darwin_arm64.tar.gz tallyfy
+    ```
+
+    **Windows:** download the `windows` zip, then run `Unblock-File .\tallyfy.exe`
+    (binaries are not yet Authenticode-signed).
+
+    > **Note on unsigned binaries:** this release is not code-signed or notarized yet.
+    > Homebrew installs work out of the box. If your browser downloaded the archive
+    > on macOS, clear the quarantine flag: `xattr -d com.apple.quarantine ./tallyfy`
+    > (curl/wget downloads are not quarantined). See README > Installation.
+
+# Homebrew tap via the current (non-deprecated) casks directive.
+# v1 ships UNSIGNED darwin binaries: Homebrew quarantines cask artifacts, so a
+# post-install hook strips the quarantine attribute (GoReleaser-documented
+# pattern). DELETE the hooks block once Developer-ID signing + notarization land.
+homebrew_casks:
+  - name: tallyfy
+    ids: [default]
+    binaries: [tallyfy]
+    directory: Casks
+    description: "Command-line interface for Tallyfy - deterministic workflow automation"
+    homepage: "https://tallyfy.com"
+    skip_upload: auto
+    repository:
+      owner: tallyfy
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: tallyfy-bot
+      email: bot@tallyfy.com
+    commit_msg_template: "chore: update {{ .ProjectName }} cask to {{ .Tag }}"
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/tallyfy"]
+          end
+
+# ---------------------------------------------------------------------------
+# FUTURE (deliberately disabled for v0.1.0):
+#   notarize:   macOS Developer ID signing + notarization (needs Apple cert)
+#   signs:      cosign signing of checksums.txt
+#   dockers:    ghcr.io/tallyfy/cli (enable with CI releases + packages:write)
+#   scoops:     tallyfy/scoop-bucket (v0.2, needs bucket repo)
+#   nfpms:      .deb/.rpm packages
+# ---------------------------------------------------------------------------
