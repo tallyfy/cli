@@ -141,7 +141,7 @@ func getJSON(ctx context.Context, url string, v any) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("GitHub API %s: %s: %s", url, resp.Status, strings.TrimSpace(string(body)))

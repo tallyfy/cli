@@ -80,7 +80,7 @@ func TestHeadersOnEveryRequest(t *testing.T) {
 		case http.MethodPost:
 			gotPost = r.Header.Clone()
 		}
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 
 	if _, err := c.Do(context.Background(), http.MethodGet, "me", nil, nil, nil); err != nil {
@@ -116,7 +116,7 @@ func TestNoAuthorizationWhenTokenEmpty(t *testing.T) {
 	var got http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Clone()
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	t.Cleanup(srv.Close)
 	c := New(Options{BaseURL: srv.URL, MaxRetries: -1})
@@ -133,7 +133,7 @@ func TestURLJoining(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotQuery = r.URL.Query().Get("a")
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	t.Cleanup(srv.Close)
 	// Trailing slash on BaseURL + leading slash on path must not double up.
@@ -167,10 +167,10 @@ func TestErrorMapping(t *testing.T) {
 		{500, `not json at all`, CategoryGeneric, "", "500"},
 	}
 	for _, tc := range cases {
-		c := newTestClient(t, -1, func(w http.ResponseWriter, r *http.Request) {
+		c := newTestClient(t, -1, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("X-Request-Id", "req-123")
 			w.WriteHeader(tc.status)
-			w.Write([]byte(tc.body))
+			_, _ = w.Write([]byte(tc.body))
 		})
 		// POST so no status is ever retried here.
 		_, err := c.Do(context.Background(), http.MethodPost, "organizations/o/thing", nil, json.RawMessage(`{}`), nil)
@@ -207,9 +207,9 @@ func TestErrorMapping(t *testing.T) {
 
 func TestErrorBodyCappedAt8KiB(t *testing.T) {
 	big := strings.Repeat("x", errBodyCap+1000)
-	c := newTestClient(t, -1, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, -1, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(500)
-		io.WriteString(w, big)
+		_, _ = io.WriteString(w, big)
 	})
 	_, err := c.Do(context.Background(), http.MethodPost, "p", nil, json.RawMessage(`{}`), nil)
 	var ae *APIError
@@ -224,14 +224,14 @@ func TestErrorBodyCappedAt8KiB(t *testing.T) {
 func TestRetry429HonorsRetryAfterSeconds(t *testing.T) {
 	growBackoff(t) // backoff would stall ≥3s; Retry-After: 0 must win
 	var hits atomic.Int32
-	c := newTestClient(t, 4, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, 4, func(w http.ResponseWriter, _ *http.Request) {
 		if hits.Add(1) <= 2 {
 			w.Header().Set("Retry-After", "0")
 			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte(`{"message":"slow down"}`))
+			_, _ = w.Write([]byte(`{"message":"slow down"}`))
 			return
 		}
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 	start := time.Now()
 	if _, err := c.Do(context.Background(), http.MethodGet, "me", nil, nil, nil); err != nil {
@@ -248,14 +248,14 @@ func TestRetry429HonorsRetryAfterSeconds(t *testing.T) {
 func TestRetry429HonorsRetryAfterHTTPDate(t *testing.T) {
 	growBackoff(t)
 	var hits atomic.Int32
-	c := newTestClient(t, 2, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, 2, func(w http.ResponseWriter, _ *http.Request) {
 		if hits.Add(1) == 1 {
 			// A date in the past clamps to zero delay.
 			w.Header().Set("Retry-After", time.Now().Add(-time.Second).UTC().Format(http.TimeFormat))
 			w.WriteHeader(http.StatusTooManyRequests)
 			return
 		}
-		w.Write([]byte(`{"data":{}}`))
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	})
 	start := time.Now()
 	if _, err := c.Do(context.Background(), http.MethodGet, "me", nil, nil, nil); err != nil {
@@ -271,11 +271,11 @@ func TestRetry429HonorsRetryAfterHTTPDate(t *testing.T) {
 
 func TestRateLimitErrorAfterBudget(t *testing.T) {
 	var hits atomic.Int32
-	c := newTestClient(t, 2, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, 2, func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
 		w.Header().Set("Retry-After", "0")
 		w.WriteHeader(http.StatusTooManyRequests)
-		w.Write([]byte(`{"message":"rate limited"}`))
+		_, _ = w.Write([]byte(`{"message":"rate limited"}`))
 	})
 	_, err := c.Do(context.Background(), http.MethodGet, "me", nil, nil, nil)
 	if err == nil {
@@ -305,12 +305,12 @@ func Test5xxRetriedForGETOnly(t *testing.T) {
 	shrinkBackoff(t)
 	for _, status := range []int{502, 503, 504} {
 		var hits atomic.Int32
-		c := newTestClient(t, 3, func(w http.ResponseWriter, r *http.Request) {
+		c := newTestClient(t, 3, func(w http.ResponseWriter, _ *http.Request) {
 			if hits.Add(1) == 1 {
 				w.WriteHeader(status)
 				return
 			}
-			w.Write([]byte(`{"data":{}}`))
+			_, _ = w.Write([]byte(`{"data":{}}`))
 		})
 		if _, err := c.Do(context.Background(), http.MethodGet, "me", nil, nil, nil); err != nil {
 			t.Fatalf("GET after %d: %v", status, err)
@@ -324,10 +324,10 @@ func Test5xxRetriedForGETOnly(t *testing.T) {
 func Test5xxNotRetriedForPOST(t *testing.T) {
 	shrinkBackoff(t)
 	var hits atomic.Int32
-	c := newTestClient(t, 3, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, 3, func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
 		w.WriteHeader(502)
-		w.Write([]byte(`{"message":"bad gateway"}`))
+		_, _ = w.Write([]byte(`{"message":"bad gateway"}`))
 	})
 	_, err := c.Do(context.Background(), http.MethodPost, "organizations/o/runs", nil, json.RawMessage(`{}`), nil)
 	var ae *APIError
@@ -355,7 +355,7 @@ func TestPOSTRetriedOn429WithBodyReplay(t *testing.T) {
 		default:
 			secondBody = b
 			w.WriteHeader(http.StatusCreated)
-			w.Write([]byte(`{"data":{}}`))
+			_, _ = w.Write([]byte(`{"data":{}}`))
 		}
 	})
 	if _, err := c.Do(context.Background(), http.MethodPost, "p", nil, json.RawMessage(payload), nil); err != nil {
@@ -373,15 +373,15 @@ func TestTransportErrorRetriedForGETNotPOST(t *testing.T) {
 	shrinkBackoff(t)
 	newFlaky := func() (http.HandlerFunc, *atomic.Int32) {
 		var hits atomic.Int32
-		return func(w http.ResponseWriter, r *http.Request) {
+		return func(w http.ResponseWriter, _ *http.Request) {
 			if hits.Add(1) == 1 {
 				conn, _, err := w.(http.Hijacker).Hijack()
 				if err == nil {
-					conn.Close() // slam the connection: transport error
+					_ = conn.Close() // slam the connection: transport error
 				}
 				return
 			}
-			w.Write([]byte(`{"data":{}}`))
+			_, _ = w.Write([]byte(`{"data":{}}`))
 		}, &hits
 	}
 
@@ -405,7 +405,7 @@ func TestTransportErrorRetriedForGETNotPOST(t *testing.T) {
 }
 
 func Test204NoContent(t *testing.T) {
-	c := newTestClient(t, -1, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, -1, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	var out struct {
@@ -424,7 +424,7 @@ func Test204NoContent(t *testing.T) {
 }
 
 func TestEmptyBody200WithOut(t *testing.T) {
-	c := newTestClient(t, -1, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, -1, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK) // 200 with zero-length body
 	})
 	var out map[string]any
@@ -435,7 +435,7 @@ func TestEmptyBody200WithOut(t *testing.T) {
 
 func TestContextCancellationDuringRetrySleep(t *testing.T) {
 	var hits atomic.Int32
-	c := newTestClient(t, 4, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, 4, func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
 		w.Header().Set("Retry-After", "5")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -457,8 +457,8 @@ func TestContextCancellationDuringRetrySleep(t *testing.T) {
 
 func TestVerboseOutputRedactsToken(t *testing.T) {
 	var buf bytes.Buffer
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{}}`))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{}}`))
 	}))
 	t.Cleanup(srv.Close)
 	c := New(Options{BaseURL: srv.URL, Token: testToken, MaxRetries: -1, Verbose: &buf})
@@ -490,7 +490,7 @@ func TestRawPassthrough(t *testing.T) {
 			t.Errorf("body = %q", b)
 		}
 		w.WriteHeader(http.StatusCreated)
-		w.Write([]byte(`{"anything":["goes",1]}`))
+		_, _ = w.Write([]byte(`{"anything":["goes",1]}`))
 	})
 	status, body, err := c.Raw(context.Background(), http.MethodPost, "organizations/o/export", nil, []byte(`{"in":true}`))
 	if err != nil {
@@ -505,9 +505,9 @@ func TestRawPassthrough(t *testing.T) {
 }
 
 func TestRawNon2xxReturnsBodyAndAPIError(t *testing.T) {
-	c := newTestClient(t, -1, func(w http.ResponseWriter, r *http.Request) {
+	c := newTestClient(t, -1, func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(422)
-		w.Write([]byte(`{"message":"nope","errors":{}}`))
+		_, _ = w.Write([]byte(`{"message":"nope","errors":{}}`))
 	})
 	status, body, err := c.Raw(context.Background(), http.MethodPost, "p", nil, []byte(`{}`))
 	if status != 422 {

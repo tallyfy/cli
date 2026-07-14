@@ -133,7 +133,7 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 		}
 
 		raw, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if readErr != nil {
 			c.verbosef("<- error %s: %v\n", elapsed, readErr)
 			lastResp = nil
@@ -265,7 +265,7 @@ func retryDelay(retry int, prev *http.Response) time.Duration {
 	if d > defaultRetry.MaxDelay {
 		d = defaultRetry.MaxDelay
 	}
-	d = time.Duration(float64(d) * (0.8 + 0.4*rand.Float64())) // ±20% jitter
+	d = time.Duration(float64(d) * (0.8 + 0.4*rand.Float64())) //nolint:gosec // G404: math/rand jitter for retry backoff is not security-sensitive
 	return minDuration(d, defaultRetry.MaxDelay)
 }
 
@@ -302,7 +302,7 @@ func (c *Client) verbosef(format string, args ...any) {
 	if c.opts.Verbose == nil {
 		return
 	}
-	fmt.Fprintf(c.opts.Verbose, format, args...)
+	_, _ = fmt.Fprintf(c.opts.Verbose, format, args...)
 }
 
 // redact scrubs the bearer token from transport error strings (URL errors

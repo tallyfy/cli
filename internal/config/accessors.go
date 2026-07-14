@@ -116,7 +116,7 @@ func renderJSON(v any) string {
 func ListEffective(r *Resolved) []EffectiveEntry {
 	out := make([]EffectiveEntry, 0, len(r.Sources))
 	for _, si := range r.Sources {
-		out = append(out, EffectiveEntry{Key: si.Key, Value: si.Value, Scope: si.Scope, File: si.File})
+		out = append(out, EffectiveEntry(si))
 	}
 	return out
 }
@@ -187,7 +187,7 @@ func SetKey(scope, projectDir, key, value string) error {
 		return err
 	}
 	m := map[string]any{}
-	if data, rerr := os.ReadFile(path); rerr == nil {
+	if data, rerr := os.ReadFile(path); rerr == nil { //nolint:gosec // G304: reads a Tallyfy settings file the CLI manages
 		if err := json.Unmarshal(data, &m); err != nil {
 			return fmt.Errorf("%s: invalid JSON (%v); fix or remove the file before writing to it", path, err)
 		}
@@ -298,9 +298,9 @@ func setDotted(m map[string]any, key string, value any) error {
 // writeSettingsWithBackup backs up the existing file to <file>.bak.<unix-ts>,
 // rotates to the 5 newest backups, then writes the new content atomically.
 func writeSettingsWithBackup(path string, m map[string]any) error {
-	if data, err := os.ReadFile(path); err == nil {
+	if data, err := os.ReadFile(path); err == nil { //nolint:gosec // G304: reads the CLI's own settings file to back it up
 		bak := fmt.Sprintf("%s.bak.%d", path, nowUnix())
-		if err := os.WriteFile(bak, data, 0o600); err != nil {
+		if err := os.WriteFile(bak, data, 0o600); err != nil { //nolint:gosec // G703: bak is derived from the CLI's own settings path (path + ".bak.<ts>")
 			return fmt.Errorf("cannot write backup %s: %v", bak, err)
 		}
 		if err := rotateBackups(path); err != nil {

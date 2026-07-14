@@ -8,6 +8,7 @@ import (
 // ErrorCategory buckets API failures for exit-code mapping (spec §6.8).
 type ErrorCategory int
 
+// ErrorCategory values bucket API failures by exit code (spec §6.8).
 const (
 	CategoryGeneric     ErrorCategory = iota // exit 1
 	CategoryAuth                             // exit 3 (401/403)
@@ -35,14 +36,14 @@ func (e *APIError) Error() string {
 
 // Category maps the HTTP status to an exit-code bucket.
 func (e *APIError) Category() ErrorCategory {
-	switch {
-	case e.StatusCode == 401 || e.StatusCode == 403:
+	switch e.StatusCode {
+	case 401, 403:
 		return CategoryAuth
-	case e.StatusCode == 404:
+	case 404:
 		return CategoryNotFound
-	case e.StatusCode == 429:
+	case 429:
 		return CategoryRateLimited
-	case e.StatusCode == 422 || e.StatusCode == 400:
+	case 422, 400:
 		return CategoryValidation
 	default:
 		return CategoryGeneric

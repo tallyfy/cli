@@ -73,9 +73,9 @@ func Apply(ctx context.Context, res *CheckResult, w io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	fmt.Fprintf(w, "Downloading %s...\n", res.AssetName)
+	_, _ = fmt.Fprintf(w, "Downloading %s...\n", res.AssetName)
 	archivePath := filepath.Join(tmpDir, res.AssetName)
 	if err := downloadFile(ctx, res.AssetURL, archivePath); err != nil {
 		return fmt.Errorf("download %s: %w", res.AssetName, err)
@@ -85,7 +85,7 @@ func Apply(ctx context.Context, res *CheckResult, w io.Writer) error {
 		return fmt.Errorf("download checksums.txt: %w", err)
 	}
 
-	fmt.Fprintln(w, "Verifying checksum...")
+	_, _ = fmt.Fprintln(w, "Verifying checksum...")
 	if err := verifyChecksum(archivePath, checksumsPath, res.AssetName); err != nil {
 		return err
 	}
@@ -94,13 +94,13 @@ func Apply(ctx context.Context, res *CheckResult, w io.Writer) error {
 	if runtime.GOOS == "windows" {
 		binName = "tallyfy.exe"
 	}
-	fmt.Fprintf(w, "Extracting %s...\n", binName)
+	_, _ = fmt.Fprintf(w, "Extracting %s...\n", binName)
 	binBytes, err := extractBinary(archivePath, res.AssetName, binName)
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintf(w, "Installing to %s...\n", target)
+	_, _ = fmt.Fprintf(w, "Installing to %s...\n", target)
 	opts := selfupdate.Options{
 		TargetPath:  target,
 		OldSavePath: target + ".old",
@@ -111,7 +111,7 @@ func Apply(ctx context.Context, res *CheckResult, w io.Writer) error {
 	// Best-effort: on Windows the running old binary cannot be deleted yet;
 	// CleanupOldBinary removes it on the next start.
 	_ = os.Remove(target + ".old")
-	fmt.Fprintf(w, "Updated tallyfy to %s\n", res.Latest)
+	_, _ = fmt.Fprintf(w, "Updated tallyfy to %s\n", res.Latest)
 	return nil
 }
 
@@ -138,11 +138,11 @@ func downloadFile(ctx context.Context, url, dest string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %s: %s", url, resp.Status)
 	}
-	f, err := os.Create(dest)
+	f, err := os.Create(dest) //nolint:gosec // G304: dest is inside our own os.MkdirTemp dir; asset name comes from trusted release metadata
 	if err != nil {
 		return err
 	}
@@ -157,11 +157,11 @@ func downloadFile(ctx context.Context, url, dest string) error {
 // assetName ("<sha256-hex>  <filename>") and compares it with the sha256 of
 // the downloaded archive.
 func verifyChecksum(archivePath, checksumsPath, assetName string) error {
-	f, err := os.Open(checksumsPath)
+	f, err := os.Open(checksumsPath) //nolint:gosec // G304: checksumsPath is inside our own os.MkdirTemp dir
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	want := ""
 	scanner := bufio.NewScanner(f)
@@ -179,11 +179,11 @@ func verifyChecksum(archivePath, checksumsPath, assetName string) error {
 		return fmt.Errorf("checksums.txt has no entry for %s", assetName)
 	}
 
-	af, err := os.Open(archivePath)
+	af, err := os.Open(archivePath) //nolint:gosec // G304: archivePath is inside our own os.MkdirTemp dir
 	if err != nil {
 		return err
 	}
-	defer af.Close()
+	defer func() { _ = af.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, af); err != nil {
 		return err
@@ -204,16 +204,16 @@ func extractBinary(archivePath, assetName, binName string) ([]byte, error) {
 }
 
 func extractTarGz(archivePath, binName string) ([]byte, error) {
-	f, err := os.Open(archivePath)
+	f, err := os.Open(archivePath) //nolint:gosec // G304: archivePath is inside our own os.MkdirTemp dir
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return nil, err
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
@@ -235,7 +235,7 @@ func extractZip(archivePath, binName string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	for _, zf := range zr.File {
 		if zf.FileInfo().IsDir() || filepath.Base(zf.Name) != binName {
 			continue

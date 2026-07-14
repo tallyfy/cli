@@ -31,7 +31,7 @@ func pagedHandler(t *testing.T, totalPages, itemsPerPage int, calls *[]string) h
 			links = fmt.Sprintf(`{"next":"https://x/items?page=%d"}`, page+1)
 		}
 		data, _ := json.Marshal(items)
-		fmt.Fprintf(w, `{"data":%s,"meta":{"pagination":{"total":%d,"count":%d,"per_page":%d,"current_page":%d,"total_pages":%d,"links":%s}}}`,
+		_, _ = fmt.Fprintf(w, `{"data":%s,"meta":{"pagination":{"total":%d,"count":%d,"per_page":%d,"current_page":%d,"total_pages":%d,"links":%s}}}`,
 			data, totalPages*itemsPerPage, len(items), itemsPerPage, page, totalPages, links)
 	}
 }
@@ -98,10 +98,10 @@ func TestPaginateLinksFallbackWhenNoTotalPages(t *testing.T) {
 			links = `{"next":"https://x/items?page=2"}`
 		}
 		// No total/total_pages fields at all — only links signal more pages.
-		fmt.Fprintf(w, `{"data":[%d],"meta":{"pagination":{"current_page":%d,"links":%s}}}`, page, page, links)
+		_, _ = fmt.Fprintf(w, `{"data":[%d],"meta":{"pagination":{"current_page":%d,"links":%s}}}`, page, page, links)
 	})
 	var pages int
-	err := c.Paginate(context.Background(), "items", ListOptions{All: true}, func(pg Page) (bool, error) {
+	err := c.Paginate(context.Background(), "items", ListOptions{All: true}, func(_ Page) (bool, error) {
 		pages++
 		return true, nil
 	})
@@ -116,7 +116,7 @@ func TestPaginateLinksFallbackWhenNoTotalPages(t *testing.T) {
 func TestPaginateStopsWhenOnPageReturnsFalse(t *testing.T) {
 	var calls []string
 	c := newTestClient(t, -1, pagedHandler(t, 5, 2, &calls))
-	err := c.Paginate(context.Background(), "items", ListOptions{All: true}, func(pg Page) (bool, error) {
+	err := c.Paginate(context.Background(), "items", ListOptions{All: true}, func(_ Page) (bool, error) {
 		return false, nil
 	})
 	if err != nil {
@@ -131,7 +131,7 @@ func TestPaginatePropagatesOnPageError(t *testing.T) {
 	var calls []string
 	c := newTestClient(t, -1, pagedHandler(t, 5, 2, &calls))
 	boom := errors.New("boom")
-	err := c.Paginate(context.Background(), "items", ListOptions{All: true}, func(pg Page) (bool, error) {
+	err := c.Paginate(context.Background(), "items", ListOptions{All: true}, func(_ Page) (bool, error) {
 		return true, boom
 	})
 	if !errors.Is(err, boom) {
@@ -143,7 +143,7 @@ func TestPaginateQueryParams(t *testing.T) {
 	var query string
 	c := newTestClient(t, -1, func(w http.ResponseWriter, r *http.Request) {
 		query = r.URL.RawQuery
-		fmt.Fprint(w, `{"data":[]}`)
+		_, _ = fmt.Fprint(w, `{"data":[]}`)
 	})
 	opts := ListOptions{
 		Page:    2,
@@ -180,8 +180,8 @@ func TestCollectAllAppliesLimit(t *testing.T) {
 }
 
 func TestCollectAllTypedDecode(t *testing.T) {
-	c := newTestClient(t, -1, func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"data":[{"id":"b1","title":"Onboard"},{"id":"b2","title":"Offboard"}],`+
+	c := newTestClient(t, -1, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprint(w, `{"data":[{"id":"b1","title":"Onboard"},{"id":"b2","title":"Offboard"}],`+
 			`"meta":{"pagination":{"total":2,"count":2,"per_page":10,"current_page":1,"total_pages":1,"links":[]}}}`)
 	})
 	bps, pg, err := CollectAll[Blueprint](context.Background(), c, "organizations/o/checklists", ListOptions{})

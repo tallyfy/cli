@@ -47,7 +47,7 @@ func (r *runner) runHTTP(rawURL string, payload []byte, allowlist []string) (str
 	if err != nil {
 		return err.Error(), err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		summary := fmt.Sprintf("HTTP %d", resp.StatusCode)

@@ -24,7 +24,7 @@ func (r *runner) runExec(command string, payload []byte) (string, error) {
 	defer cancel()
 
 	name, args := shellCommand(command)
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := exec.CommandContext(ctx, name, args...) //nolint:gosec // G204: runs a user-configured hook command via the platform shell (spec §6.x)
 	cmd.Stdin = bytes.NewReader(payload)
 	cmd.Stdout = io.Discard
 	errBuf := &capWriter{max: stderrCap}

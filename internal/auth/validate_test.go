@@ -81,7 +81,7 @@ func TestValidateTokenRejectsBadToken(t *testing.T) {
 		t.Skip("pkg/tallyfy Me not implemented yet (lane L2 pending); ValidateToken live path is covered by the integration stage")
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":true,"message":"Unauthenticated."}`))

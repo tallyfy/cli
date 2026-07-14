@@ -202,8 +202,8 @@ func applyFixture(t *testing.T, newContent []byte, tamper bool) *CheckResult {
 	checksums := sum + "  " + assetName + "\nffff  decoy.tar.gz\n"
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/asset", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(archive) })
-	mux.HandleFunc("/checksums.txt", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(checksums)) })
+	mux.HandleFunc("/asset", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) })
+	mux.HandleFunc("/checksums.txt", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(checksums)) })
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 

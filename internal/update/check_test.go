@@ -190,7 +190,7 @@ func TestCheckMissingChecksumsAsset(t *testing.T) {
 }
 
 func TestCheckHTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "rate limited", http.StatusForbidden)
 	}))
 	old := APIBaseURL

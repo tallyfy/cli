@@ -133,13 +133,13 @@ func TestEmitSwallowsServerErrors(t *testing.T) {
 
 func TestEmitSwallowsConnectionErrors(t *testing.T) {
 	clearEnableEnv(t)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 	url := srv.URL
 	srv.Close() // dead endpoint
 	cfg := &config.Resolved{TelemetryEnabled: true, TelemetryEndpoint: url}
 	Emit(cfg, testEvent) // must not panic or return an error (there is none)
 }
 
-func TestEmitNilConfig(t *testing.T) {
+func TestEmitNilConfig(_ *testing.T) {
 	Emit(nil, testEvent) // must not panic
 }

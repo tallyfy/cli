@@ -14,7 +14,7 @@ import (
 func TestHTTPHookRedirectStaysInAllowlist(t *testing.T) {
 	var leaked bool
 	// The exfiltration target - NOT in the allowlist.
-	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		leaked = true
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -79,7 +79,7 @@ func TestRedirectHostRechecked(t *testing.T) {
 // commands. The trimmed URL must now be both validated and requested.
 func TestHTTPHookLeadingWhitespaceURL(t *testing.T) {
 	var got bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		got = true
 		w.WriteHeader(http.StatusOK)
 	}))

@@ -45,6 +45,7 @@ type Rule struct {
 // Decision is the evaluation outcome.
 type Decision int
 
+// Decision values are the possible permission-evaluation outcomes.
 const (
 	Allow Decision = iota
 	Ask

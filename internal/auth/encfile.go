@@ -86,7 +86,7 @@ func encLoad() (string, error) {
 		return "", err
 	}
 	credPath := filepath.Join(dir, credFileName)
-	b64, err := os.ReadFile(credPath)
+	b64, err := os.ReadFile(credPath) //nolint:gosec // G304: reads the CLI's own credentials file under ~/.tallyfy
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", nil
 	}
@@ -95,7 +95,7 @@ func encLoad() (string, error) {
 	}
 
 	keyPath := filepath.Join(dir, keyFileName)
-	key, err := os.ReadFile(keyPath)
+	key, err := os.ReadFile(keyPath) //nolint:gosec // G304: reads the CLI's own key file under ~/.tallyfy
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", corruptCredentials(credPath, errors.New("its key file is missing"))
 	}
@@ -147,7 +147,7 @@ func encDelete() error {
 // from crypto/rand, mode 0600.
 func loadOrCreateKey(dir string) ([]byte, error) {
 	path := filepath.Join(dir, keyFileName)
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(path) //nolint:gosec // G304: reads the CLI's own key file under ~/.tallyfy
 	switch {
 	case err == nil:
 		if len(b) != keySize {
@@ -196,13 +196,13 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once renamed
+	defer func() { _ = os.Remove(tmpName) }() // no-op once renamed
 	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {

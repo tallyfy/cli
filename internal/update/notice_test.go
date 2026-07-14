@@ -69,47 +69,47 @@ func TestMaybeNoticeGates(t *testing.T) {
 		name   string
 		mutate func(t *testing.T, cfg *config.Resolved) (outputMode string, quiet bool)
 	}{
-		{"quiet", func(t *testing.T, cfg *config.Resolved) (string, bool) { return "table", true }},
-		{"json mode", func(t *testing.T, cfg *config.Resolved) (string, bool) { return "json", false }},
-		{"csv mode", func(t *testing.T, cfg *config.Resolved) (string, bool) { return "csv", false }},
-		{"ndjson mode", func(t *testing.T, cfg *config.Resolved) (string, bool) { return "ndjson", false }},
-		{"autoUpdate off", func(t *testing.T, cfg *config.Resolved) (string, bool) {
+		{"quiet", func(_ *testing.T, _ *config.Resolved) (string, bool) { return "table", true }},
+		{"json mode", func(_ *testing.T, _ *config.Resolved) (string, bool) { return "json", false }},
+		{"csv mode", func(_ *testing.T, _ *config.Resolved) (string, bool) { return "csv", false }},
+		{"ndjson mode", func(_ *testing.T, _ *config.Resolved) (string, bool) { return "ndjson", false }},
+		{"autoUpdate off", func(_ *testing.T, cfg *config.Resolved) (string, bool) {
 			cfg.UpdateAutoUpdate = false
 			return "table", false
 		}},
-		{"env opt-out 1", func(t *testing.T, cfg *config.Resolved) (string, bool) {
+		{"env opt-out 1", func(t *testing.T, _ *config.Resolved) (string, bool) {
 			t.Setenv(EnvNoUpdateCheck, "1")
 			return "table", false
 		}},
-		{"env opt-out true", func(t *testing.T, cfg *config.Resolved) (string, bool) {
+		{"env opt-out true", func(t *testing.T, _ *config.Resolved) (string, bool) {
 			t.Setenv(EnvNoUpdateCheck, "true")
 			return "table", false
 		}},
-		{"CI", func(t *testing.T, cfg *config.Resolved) (string, bool) {
+		{"CI", func(t *testing.T, _ *config.Resolved) (string, bool) {
 			t.Setenv("CI", "true")
 			return "table", false
 		}},
-		{"GITHUB_ACTIONS", func(t *testing.T, cfg *config.Resolved) (string, bool) {
+		{"GITHUB_ACTIONS", func(t *testing.T, _ *config.Resolved) (string, bool) {
 			t.Setenv("GITHUB_ACTIONS", "true")
 			return "table", false
 		}},
-		{"TF_BUILD", func(t *testing.T, cfg *config.Resolved) (string, bool) {
+		{"TF_BUILD", func(t *testing.T, _ *config.Resolved) (string, bool) {
 			t.Setenv("TF_BUILD", "True")
 			return "table", false
 		}},
-		{"JENKINS_URL", func(t *testing.T, cfg *config.Resolved) (string, bool) {
+		{"JENKINS_URL", func(t *testing.T, _ *config.Resolved) (string, bool) {
 			t.Setenv("JENKINS_URL", "https://ci.local")
 			return "table", false
 		}},
-		{"not a TTY", func(t *testing.T, cfg *config.Resolved) (string, bool) {
+		{"not a TTY", func(_ *testing.T, _ *config.Resolved) (string, bool) {
 			stderrIsTerminal = func() bool { return false }
 			return "table", false
 		}},
-		{"dev build", func(t *testing.T, cfg *config.Resolved) (string, bool) {
+		{"dev build", func(_ *testing.T, _ *config.Resolved) (string, bool) {
 			version.Version = "dev"
 			return "table", false
 		}},
-		{"nil cfg handled by caller guard", func(t *testing.T, cfg *config.Resolved) (string, bool) {
+		{"nil cfg handled by caller guard", func(_ *testing.T, _ *config.Resolved) (string, bool) {
 			return "table", false
 		}},
 	}

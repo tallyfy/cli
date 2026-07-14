@@ -220,7 +220,7 @@ func TestInvalidMatcherSkipsWithWarning(t *testing.T) {
 	skipIfWindows(t)
 	marker := filepath.Join(t.TempDir(), "marker")
 	hs := []config.Hook{{Matcher: "Blueprint(", Command: writeScript(t, "touch '"+marker+"'")}}
-	opts := Options{MatchToken: func(m string) (bool, error) { return false, errors.New("bad matcher") }}
+	opts := Options{MatchToken: func(_ string) (bool, error) { return false, errors.New("bad matcher") }}
 
 	warns, err := NewRunner(opts).Fire(PreDelete, hs, testPayload())
 	if err != nil {

@@ -32,7 +32,7 @@ func LoadState() (*State, error) {
 	if err != nil {
 		return &State{}, err
 	}
-	data, err := os.ReadFile(p)
+	data, err := os.ReadFile(p) //nolint:gosec // G304: reads the CLI's own state.json under ~/.tallyfy
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &State{}, nil
@@ -72,17 +72,17 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op after a successful rename
+	defer func() { _ = os.Remove(tmpName) }() // no-op after a successful rename
 	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {

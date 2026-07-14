@@ -75,7 +75,7 @@ func MaybeNotice(cfg *config.Resolved, w io.Writer, outputMode string, quiet boo
 	if st.LatestSeen != "" {
 		latest := "v" + strings.TrimPrefix(st.LatestSeen, "v")
 		if semver.IsValid(latest) && semver.IsValid(current) && semver.Compare(latest, current) > 0 {
-			fmt.Fprintf(w, "A new version of tallyfy is available: %s -> %s (run: tallyfy update)\n", current, latest)
+			_, _ = fmt.Fprintf(w, "A new version of tallyfy is available: %s -> %s (run: tallyfy update)\n", current, latest)
 		}
 	}
 

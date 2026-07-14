@@ -60,9 +60,9 @@ func runHelper(command string, extraEnv map[string]string) (string, error) {
 
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd", "/C", command)
+		cmd = exec.CommandContext(ctx, "cmd", "/C", command) //nolint:gosec // G204: apiKeyHelper is a user-configured command line, executed by design (spec §6.4)
 	} else {
-		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", command)
+		cmd = exec.CommandContext(ctx, "/bin/sh", "-c", command) //nolint:gosec // G204: apiKeyHelper is a user-configured command line, executed by design (spec §6.4)
 	}
 
 	env := os.Environ()

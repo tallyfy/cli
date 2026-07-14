@@ -8,6 +8,7 @@ package output
 // Mode is an output format.
 type Mode string
 
+// Mode values name the supported output formats.
 const (
 	ModeTable  Mode = "table"
 	ModeJSON   Mode = "json"

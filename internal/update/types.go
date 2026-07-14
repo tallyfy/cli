@@ -19,6 +19,7 @@ const EnvNoUpdateCheck = "TALLYFY_NO_UPDATE_CHECK"
 // Channel selects which releases are eligible.
 type Channel string
 
+// Channel values select which releases are eligible for updates.
 const (
 	ChannelStable Channel = "stable" // GET releases/latest (no prereleases)
 	ChannelLatest Channel = "latest" // newest by semver including prereleases

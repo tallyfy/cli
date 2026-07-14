@@ -21,6 +21,7 @@ package config
 // Scope identifies where a setting came from. Higher values take precedence.
 type Scope int
 
+// Scope values in ascending precedence order (higher wins).
 const (
 	ScopeDefault Scope = iota
 	ScopeUser

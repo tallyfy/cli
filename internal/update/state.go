@@ -32,7 +32,7 @@ func readState() State {
 	if err != nil {
 		return st
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: reads the CLI's own update-state file under ~/.tallyfy
 	if err != nil {
 		return st
 	}

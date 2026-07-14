@@ -63,7 +63,7 @@ func loadDir(dir, source string, byName map[string]Command) {
 	}
 	sort.Strings(matches)
 	for _, path := range matches {
-		data, err := os.ReadFile(path)
+		data, err := os.ReadFile(path) //nolint:gosec // G304: reads the user's own saved-command *.yaml files from resolved config dirs
 		if err != nil {
 			LastWarnings = append(LastWarnings, fmt.Sprintf("%s: %v", path, err))
 			continue
@@ -160,15 +160,15 @@ func splitArgs(s string) ([]string, error) {
 	inToken := false
 	i := 0
 	for i < len(s) {
-		switch ch := s[i]; {
-		case ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r':
+		switch ch := s[i]; ch {
+		case ' ', '\t', '\n', '\r':
 			if inToken {
 				args = append(args, cur.String())
 				cur.Reset()
 				inToken = false
 			}
 			i++
-		case ch == '\'':
+		case '\'':
 			inToken = true
 			end := strings.IndexByte(s[i+1:], '\'')
 			if end < 0 {
@@ -176,7 +176,7 @@ func splitArgs(s string) ([]string, error) {
 			}
 			cur.WriteString(s[i+1 : i+1+end])
 			i += end + 2
-		case ch == '"':
+		case '"':
 			inToken = true
 			i++
 			closed := false

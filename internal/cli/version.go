@@ -16,7 +16,7 @@ func init() {
 			Use:   "version",
 			Short: "Print version, commit, and build date",
 			Args:  cobra.NoArgs,
-			RunE: func(cmd *cobra.Command, args []string) error {
+			RunE: func(cmd *cobra.Command, _ []string) error {
 				jsonOut, _ := cmd.Flags().GetBool("json")
 				mode, _ := cmd.Flags().GetString("output")
 				if jsonOut || mode == "json" {
@@ -29,7 +29,7 @@ func init() {
 						}},
 					})
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "tallyfy %s (commit %s, built %s, %s/%s)\n",
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "tallyfy %s (commit %s, built %s, %s/%s)\n",
 					version.Version, version.Commit, version.Date, runtime.GOOS, runtime.GOARCH)
 				return nil
 			},

@@ -21,6 +21,7 @@ import "github.com/tallyfy/cli/internal/config"
 // Source identifies where the active credential came from.
 type Source string
 
+// Source values enumerate where the active credential was resolved from.
 const (
 	SourceFlag     Source = "flag"     // --api-key
 	SourceEnv      Source = "env"      // TALLYFY_API_TOKEN
@@ -30,7 +31,7 @@ const (
 )
 
 // EnvToken is the environment variable checked at precedence step 2.
-const EnvToken = "TALLYFY_API_TOKEN"
+const EnvToken = "TALLYFY_API_TOKEN" //nolint:gosec // G101 false positive: this is the env var NAME, not a credential value
 
 // KeychainService is the OS keychain service name.
 const KeychainService = "com.tallyfy.cli"

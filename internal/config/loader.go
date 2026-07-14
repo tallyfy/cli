@@ -155,7 +155,7 @@ func Load(o Overrides) (*Resolved, error) {
 // invalid files are skipped with a warning; with fatal == true (--settings)
 // they are errors.
 func readSettingsLayer(path string, fatal bool, warnings *[]string) (*Settings, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: reads a Tallyfy settings file at a resolved config-scope path
 	if err != nil {
 		if os.IsNotExist(err) && !fatal {
 			return nil, nil

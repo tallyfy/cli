@@ -94,7 +94,7 @@ func NewContext(cmd *cobra.Command, needsAuth bool) (*Context, error) {
 		return nil, err
 	}
 	for _, w := range cfg.Warnings {
-		fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
+		_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "warning:", w)
 	}
 
 	mode, err := output.ParseMode(cfg.Output)

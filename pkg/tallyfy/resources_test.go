@@ -30,7 +30,7 @@ func newRecorder(t *testing.T, respBody string) (*Client, *lastCall) {
 		rec.path = r.URL.Path
 		rec.query = r.URL.Query()
 		rec.body = string(b)
-		io.WriteString(w, respBody)
+		_, _ = io.WriteString(w, respBody)
 	}))
 	t.Cleanup(srv.Close)
 	return New(Options{BaseURL: srv.URL, Token: testToken, UserAgent: testUA, MaxRetries: -1}), rec

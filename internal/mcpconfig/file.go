@@ -47,7 +47,7 @@ func Save(projectDir string, f *File) error {
 		f.MCPServers = map[string]Server{}
 	}
 	dir := filepath.Join(projectDir, ".tallyfy")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil { //nolint:gosec // G301: .tallyfy holds non-secret project config; mcp.json is written 0644, so 0755 is the intended, conventional project-dir mode
 		return err
 	}
 	data, err := json.MarshalIndent(f, "", "  ")

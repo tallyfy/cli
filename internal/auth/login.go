@@ -57,11 +57,11 @@ func OpenBrowser(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", url)
+		cmd = exec.Command("open", url) //nolint:gosec // G204: opens the login URL in the user's browser via the OS opener
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url) //nolint:gosec // G204: opens the login URL in the user's browser via the OS opener
 	default: // linux and other unix: freedesktop opener
-		cmd = exec.Command("xdg-open", url)
+		cmd = exec.Command("xdg-open", url) //nolint:gosec // G204: opens the login URL in the user's browser via the OS opener
 	}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("opening browser: %w", err)
