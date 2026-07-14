@@ -28,3 +28,5 @@ func (c *Client) Do(ctx context.Context, method, path string, query url.Values, 
 func (c *Client) Paginate(ctx context.Context, path string, opts ListOptions, onPage func(Page) (bool, error)) error {
 	return errors.New("tallyfy client not implemented (L2)")
 }
+
+// keep minio/selfupdate in go.mod until lane L5 imports it (removed with this stub)
