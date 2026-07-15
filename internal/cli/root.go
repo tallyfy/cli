@@ -69,6 +69,9 @@ func registerCommands(root *cobra.Command) {
 // Execute runs the CLI and returns the process exit code.
 func Execute() int {
 	start := time.Now()
+	// Best-effort cleanup of a leftover <binary>.old from a prior self-update
+	// (notably the Windows rename dance); never blocks or errors the run.
+	update.CleanupOldBinary()
 	root := NewRootCmd()
 	err := root.Execute()
 
@@ -88,7 +91,7 @@ func Execute() int {
 // isCobraUsageError detects cobra's own flag/argument parse failures.
 func isCobraUsageError(err error) bool {
 	msg := err.Error()
-	for _, s := range []string{"unknown flag", "unknown command", "unknown shorthand flag", "invalid argument", "requires at least", "accepts at most", "flag needs an argument"} {
+	for _, s := range []string{"unknown flag", "unknown command", "unknown shorthand flag", "invalid argument", "requires at least", "accepts at most", "arg(s), received", "flag needs an argument"} {
 		if len(msg) >= len(s) && containsFold(msg, s) {
 			return true
 		}
