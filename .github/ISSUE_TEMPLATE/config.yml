@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Tallyfy support
+    url: https://tallyfy.com/products/pro/miscellaneous/support/how-can-i-contact-tallyfys-support-team/
+    about: For account, billing, or product questions unrelated to the CLI.
+  - name: Security vulnerability
+    url: https://github.com/tallyfy/cli/blob/main/SECURITY.md
+    about: Do not file public issues for security reports. Follow the security policy instead.

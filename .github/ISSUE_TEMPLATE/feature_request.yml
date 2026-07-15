@@ -1,0 +1,23 @@
+name: Feature request
+description: Suggest a command, flag, or capability for the tallyfy CLI
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: The workflow or automation you want to accomplish, not just the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed command or behavior
+      description: How you imagine invoking it, for example `tallyfy blueprint diff <a> <b>`.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: Existing commands, the REST API, the MCP server, or workarounds you already tried.

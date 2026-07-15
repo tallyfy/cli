@@ -1,0 +1,152 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://cli.tallyfy.com/schemas/settings.json",
+  "title": "Tallyfy CLI settings",
+  "description": "Configuration for the tallyfy CLI. Place at ~/.tallyfy/settings.json (user), .tallyfy/settings.json (project, committed), or .tallyfy/settings.local.json (project, personal). Scalar keys override by scope precedence; list keys (permissions, hooks, MCP servers) merge across scopes.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "org": {
+      "type": "string",
+      "description": "Default organization ID. Override per command with --org."
+    },
+    "baseUrl": {
+      "type": "string",
+      "format": "uri",
+      "description": "API base URL. Defaults to https://api.tallyfy.com.",
+      "default": "https://api.tallyfy.com"
+    },
+    "output": {
+      "type": "string",
+      "enum": ["table", "json", "csv", "ndjson"],
+      "description": "Default output format.",
+      "default": "table"
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Command permission rules. allow/ask/deny merge across scopes; deny always wins.",
+      "properties": {
+        "defaultMode": {
+          "type": "string",
+          "enum": ["allow", "ask", "deny"],
+          "description": "Decision for commands matched by no rule.",
+          "default": "ask"
+        },
+        "allow": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Resource(verb)[@org] rules to allow, e.g. \"Blueprint(list)\", \"Task(complete)@org_abc\"."
+        },
+        "ask": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Rules that prompt interactively (deny in non-interactive runs unless --yes)."
+        },
+        "deny": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Rules to block. Wildcards allowed, e.g. \"*(delete)\"."
+        },
+        "allowManagedRulesOnly": {
+          "type": "boolean",
+          "description": "Managed scope only: ignore all non-managed allow rules (lockdown)."
+        }
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "MCP server enablement. enabledServers/disabledServers merge across scopes.",
+      "properties": {
+        "enableAllProjectServers": { "type": "boolean" },
+        "enabledServers": { "type": "array", "items": { "type": "string" } },
+        "disabledServers": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "hooks": {
+      "type": "object",
+      "description": "Lifecycle hooks keyed by event name (PreLaunch, PostComplete, PreDelete, and so on). Hooks merge across scopes and run only from trusted scopes.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "matcher": {
+              "type": "string",
+              "description": "Resource(verb) matcher; empty or \"*\" matches all."
+            },
+            "type": {
+              "type": "string",
+              "enum": ["exec", "http"],
+              "default": "exec"
+            },
+            "command": { "type": "string", "description": "Exec hooks: the command to run." },
+            "url": { "type": "string", "description": "HTTP hooks: the endpoint to POST to (must pass the host allowlist)." }
+          }
+        }
+      }
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Environment variables injected into hook and helper subprocesses."
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "loginMethod": {
+          "type": "string",
+          "enum": ["token", "oauth"],
+          "default": "token"
+        },
+        "apiKeyHelper": {
+          "type": "string",
+          "description": "Path to a script that prints a token on stdout. Honored only from user, local, and managed scopes (or a trusted project)."
+        },
+        "forceOrg": {
+          "type": "string",
+          "description": "Managed scope only: pin the organization for every command."
+        }
+      }
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Usage telemetry. Off by default. When enabled, emits only command name, duration, exit code, version, and OS.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "endpoint": { "type": "string", "format": "uri" }
+      }
+    },
+    "update": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "channel": { "type": "string", "enum": ["stable", "latest"], "default": "stable" },
+        "autoUpdate": { "type": "boolean", "default": true }
+      }
+    },
+    "requiredMinimumVersion": {
+      "type": "string",
+      "description": "Managed scope only: refuse to run below this version."
+    },
+    "requiredMaximumVersion": {
+      "type": "string",
+      "description": "Managed scope only: refuse to run above this version."
+    },
+    "allowedMcpServers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Managed scope only: restrict which MCP servers may be wired in."
+    },
+    "deniedMcpServers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Managed scope only: MCP servers that may never be wired in."
+    }
+  }
+}

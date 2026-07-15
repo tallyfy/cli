@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in the tallyfy CLI isn't working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please do not include tokens or secrets. The CLI redacts tokens in `--verbose` output, but double-check any pasted logs.
+  - type: input
+    id: version
+    attributes:
+      label: tallyfy version
+      description: Output of `tallyfy version`
+      placeholder: tallyfy 0.1.0 (commit abc1234, built ..., darwin/arm64)
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Install method
+      options:
+        - Homebrew
+        - Direct download
+        - go install
+        - Windows zip
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What actually happened?
+      description: Include the exact command, its exit code, and any output. Add `--verbose` for more detail (tokens are redacted).
+    validations:
+      required: true
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Configuration relevant to the issue (from `tallyfy config list --show-sources`), OS details, or a `tallyfy doctor` summary.
