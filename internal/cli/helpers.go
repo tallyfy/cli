@@ -53,7 +53,7 @@ func (c *Context) Printf(format string, a ...any) {
 	if c.Quiet {
 		return
 	}
-	fmt.Fprintf(Stdout, format, a...)
+	_, _ = fmt.Fprintf(Stdout, format, a...)
 }
 
 // Infof writes a status line to stderr unless --quiet (keeps stdout clean for
@@ -62,13 +62,13 @@ func (c *Context) Infof(format string, a ...any) {
 	if c.Quiet {
 		return
 	}
-	fmt.Fprintf(Stderr, format, a...)
+	_, _ = fmt.Fprintf(Stderr, format, a...)
 }
 
 // DryRunf prints an intended-but-not-executed API action to stdout, prefixed
 // so scripts can detect dry-run output.
 func (c *Context) DryRunf(format string, a ...any) {
-	fmt.Fprintf(Stdout, "[dry-run] "+format+"\n", a...)
+	_, _ = fmt.Fprintf(Stdout, "[dry-run] "+format+"\n", a...)
 }
 
 // readInput reads a JSON/CSV payload from a file path, or from stdin when the

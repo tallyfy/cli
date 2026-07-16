@@ -27,7 +27,7 @@ Run this first whenever a command misbehaves.`,
 					return err
 				}
 				apiKey, _ := cmd.Flags().GetString("api-key")
-				checks := runDoctorChecks(cmd, ctx, apiKey)
+				checks := runDoctorChecks(ctx, apiKey)
 
 				cols := []string{"CHECK", "STATUS", "DETAIL"}
 				rows := make([][]string, 0, len(checks))
@@ -48,7 +48,7 @@ type doctorCheck struct {
 	detail string
 }
 
-func runDoctorChecks(cmd *cobra.Command, ctx *Context, apiKey string) []doctorCheck {
+func runDoctorChecks(ctx *Context, apiKey string) []doctorCheck {
 	var checks []doctorCheck
 
 	// 1. Configuration.

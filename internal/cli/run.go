@@ -70,15 +70,13 @@ Each saved command names a tallyfy subcommand line with {{param}} placeholders;
 func parseRunArgs(args []string) (name string, params map[string]string, passthrough []string, err error) {
 	params = map[string]string{}
 	i := 0
-	// First non-flag token is the command name.
-	for i < len(args) {
-		if !strings.HasPrefix(args[i], "-") {
-			name = args[i]
-			i++
-			break
+	// The first token (if any) is the command name; a leading flag is invalid.
+	if len(args) > 0 {
+		if strings.HasPrefix(args[0], "-") {
+			return "", nil, nil, &UsageError{Msg: "usage: tallyfy run <name> [--param key=value ...]"}
 		}
-		// A leading flag before the name is unexpected for `run`.
-		return "", nil, nil, &UsageError{Msg: "usage: tallyfy run <name> [--param key=value ...]"}
+		name = args[0]
+		i = 1
 	}
 	for i < len(args) {
 		switch {
