@@ -248,6 +248,47 @@ func TestEvaluateMatrix(t *testing.T) {
 			wantReason:      []string{"defaultMode=ask"},
 		},
 		{
+			name:            "read verb list allowed under ask default",
+			in:              Input{Token: Token{Resource: "Blueprint", Verb: "list"}, Org: "org_a", DefaultMode: "ask"},
+			want:            Allow,
+			wantFromDefault: true,
+			wantReason:      []string{"read-only verb", "list"},
+		},
+		{
+			name:            "read verb get allowed under empty default",
+			in:              Input{Token: Token{Resource: "Task", Verb: "get"}, Org: "org_a", DefaultMode: ""},
+			want:            Allow,
+			wantFromDefault: true,
+			wantReason:      []string{"read-only verb"},
+		},
+		{
+			name: "explicit deny beats read-verb auto-allow",
+			in: Input{
+				Token: Token{Resource: "Blueprint", Verb: "list"}, Org: "org_a",
+				Deny:        []Rule{mustRule(t, "Blueprint(list)", config.ScopeManaged)},
+				DefaultMode: "ask",
+			},
+			want:           Deny,
+			wantMatchedRaw: "Blueprint(list)",
+		},
+		{
+			name: "explicit ask beats read-verb auto-allow",
+			in: Input{
+				Token: Token{Resource: "Blueprint", Verb: "export"}, Org: "org_a",
+				AskRules:    []Rule{mustRule(t, "Blueprint(export)", config.ScopeUser)},
+				DefaultMode: "ask",
+			},
+			want:           Ask,
+			wantMatchedRaw: "Blueprint(export)",
+		},
+		{
+			name:            "defaultMode deny lockdown denies read verbs too",
+			in:              Input{Token: Token{Resource: "Blueprint", Verb: "list"}, Org: "org_a", DefaultMode: "deny"},
+			want:            Deny,
+			wantFromDefault: true,
+			wantReason:      []string{"defaultMode=deny"},
+		},
+		{
 			name: "first matching rule wins provenance",
 			in: Input{
 				Token: bpDelete, Org: "org_a",

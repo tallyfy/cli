@@ -171,14 +171,18 @@ func (c *Context) Guard(resource, verb string, hookEvent string, payload hooks.P
 	})
 	switch res.Decision {
 	case permissions.Deny:
+		// Deny always blocks, even a dry-run preview.
 		return &PermissionDeniedError{Token: tok, Result: res}
 	case permissions.Ask:
-		if !c.confirm(fmt.Sprintf("Proceed with %s?", tok.String())) {
+		// A dry-run executes nothing, so it previews without confirmation.
+		if !c.DryRun && !c.confirm(fmt.Sprintf("Proceed with %s?", tok.String())) {
 			res.Reason = "declined (ask rule; use --yes in non-interactive runs)"
 			return &PermissionDeniedError{Token: tok, Result: res}
 		}
 	}
-	if hookEvent != "" {
+	// Pre* hooks have side effects (exec/HTTP), so they never fire during a
+	// dry run - the preview reports intended API calls only.
+	if hookEvent != "" && !c.DryRun {
 		payload.Event = hookEvent
 		payload.Org = c.Org
 		payload.Timestamp = time.Now().UTC()

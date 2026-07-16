@@ -57,12 +57,37 @@ func Evaluate(in Input) Result {
 	case "deny":
 		d = Deny
 	}
+	// Read-only verbs are allowed by default even under the "ask" default,
+	// mirroring the read=allowed / write=ask model: a script or CI job must be
+	// able to list, get, export, and wait without --yes. An explicit deny or
+	// ask rule (evaluated above) still wins, and an explicit defaultMode="deny"
+	// lockdown still denies reads.
+	if d == Ask && isReadVerb(in.Token.Verb) {
+		return Result{
+			Decision:    Allow,
+			FromDefault: true,
+			Reason:      fmt.Sprintf("read-only verb %q allowed by default (ask mode)", in.Token.Verb),
+		}
+	}
 	return Result{
 		Decision:    d,
 		FromDefault: true,
 		Reason:      fmt.Sprintf("no matching rule; defaultMode=%s", d),
 	}
 }
+
+// readVerbs are non-mutating actions that default to Allow: they cannot change
+// data, so requiring --yes for them would break scripting and CI. An explicit
+// deny/ask rule or defaultMode="deny" still governs them.
+var readVerbs = map[string]bool{
+	"list":   true,
+	"get":    true,
+	"export": true,
+	"steps":  true,
+	"wait":   true,
+}
+
+func isReadVerb(verb string) bool { return readVerbs[verb] }
 
 // firstMatch returns a copy of the first rule matching tok+org, optionally
 // considering only managed-scope rules. Nil when nothing matches.
