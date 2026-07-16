@@ -9,8 +9,8 @@ import (
 func init() {
 	register(func(root *cobra.Command) {
 		cmd := &cobra.Command{
-			Use:       "completion [bash|zsh|fish|powershell]",
-			Short:     "Generate a shell completion script",
+			Use:   "completion [bash|zsh|fish|powershell]",
+			Short: "Generate a shell completion script",
 			Long: `Generate a shell completion script for tallyfy.
 
 Bash:
