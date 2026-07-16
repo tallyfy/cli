@@ -25,7 +25,7 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 
 	binPath = filepath.Join(dir, "tallyfy")
 	// Build from the repo root (two levels up from test/e2e).
@@ -47,6 +47,8 @@ type mockAPI struct {
 	sawGoodHeaders bool
 	runPosts       int
 	deletes        int
+	completePosts  int    // POSTs to /runs/{run}/completed-tasks
+	lastRunBody    string // most recent POST /runs request body
 }
 
 func newMockAPI() (*mockAPI, *httptest.Server) {
@@ -90,16 +92,24 @@ func (a *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 		a.mu.Unlock()
 		w.WriteHeader(204)
 	case r.Method == "POST" && path == "/organizations/org_test/runs":
+		body := readBody(r)
 		a.mu.Lock()
 		a.runPosts++
+		a.lastRunBody = body
 		a.mu.Unlock()
 		// Rows whose name contains "fail" get a 422 (drives the bulk-partial test).
-		body := readBody(r)
 		if strings.Contains(strings.ToLower(body), "fail") {
 			writeJSON(w, 422, `{"error":true,"message":"validation failed"}`)
 			return
 		}
 		writeJSON(w, 201, `{"data":{"id":"run_9","name":"launched","status":"active"}}`)
+	case r.Method == "GET" && path == "/organizations/org_test/runs/run_1/tasks":
+		writeJSON(w, 200, `{"data":[{"id":"task_1","title":"Approve","status":"active"},{"id":"task_2","title":"Sign","status":"completed"}]}`)
+	case r.Method == "POST" && path == "/organizations/org_test/runs/run_1/completed-tasks":
+		a.mu.Lock()
+		a.completePosts++
+		a.mu.Unlock()
+		writeJSON(w, 200, `{"data":{"id":"task_1","title":"Approve","status":"completed"}}`)
 	case r.Method == "POST" && path == "/organizations/org_test/tags":
 		writeJSON(w, 422, `{"error":true,"message":"title already taken"}`)
 	default:
@@ -291,5 +301,134 @@ func TestBulkPartialExit9(t *testing.T) {
 	defer api.mu.Unlock()
 	if api.runPosts != 3 {
 		t.Errorf("bulk launch made %d POSTs, want 3 (one per row)", api.runPosts)
+	}
+}
+
+func TestProcessLaunchSingleSuccess(t *testing.T) {
+	api, srv := newMockAPI()
+	defer srv.Close()
+
+	// launch is a mutation: the ask default needs --yes non-interactively.
+	res := run(t, srv.URL, "", "process", "launch", "--blueprint", "bp_1", "--name", "Solo", "--yes")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	// The mock returns the launched run as run_9; the result table must show it.
+	if !strings.Contains(res.stdout, "run_9") {
+		t.Errorf("launch stdout missing run id run_9: %q", res.stdout)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.runPosts != 1 {
+		t.Errorf("single launch made %d POST(s) to /runs, want 1", api.runPosts)
+	}
+	// json.Marshal of the payload map orders keys alphabetically and emits no
+	// spaces, so the raw body contains this exact substring.
+	if !strings.Contains(api.lastRunBody, `"checklist_id":"bp_1"`) {
+		t.Errorf("POST /runs body missing checklist_id bp_1: %q", api.lastRunBody)
+	}
+}
+
+func TestTaskListInProcess(t *testing.T) {
+	_, srv := newMockAPI()
+	defer srv.Close()
+
+	res := run(t, srv.URL, "", "task", "list", "--process", "run_1")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	for _, want := range []string{"task_1", "Approve"} {
+		if !strings.Contains(res.stdout, want) {
+			t.Errorf("task list output missing %q; got:\n%s", want, res.stdout)
+		}
+	}
+}
+
+func TestTaskCompleteInProcess(t *testing.T) {
+	api, srv := newMockAPI()
+	defer srv.Close()
+
+	// complete is a mutation: the ask default needs --yes non-interactively.
+	res := run(t, srv.URL, "", "task", "complete", "task_1", "--process", "run_1", "--yes")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.completePosts != 1 {
+		t.Errorf("complete made %d POST(s) to /runs/run_1/completed-tasks, want exactly 1", api.completePosts)
+	}
+}
+
+func TestOrgList(t *testing.T) {
+	_, srv := newMockAPI()
+	defer srv.Close()
+
+	res := run(t, srv.URL, "", "org", "list")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	for _, want := range []string{"org_test", "E2E Org"} {
+		if !strings.Contains(res.stdout, want) {
+			t.Errorf("org list output missing %q; got:\n%s", want, res.stdout)
+		}
+	}
+}
+
+func TestApiPassthroughGetMe(t *testing.T) {
+	_, srv := newMockAPI()
+	defer srv.Close()
+
+	// The api command guards as Api(request) — not a read verb in the
+	// permission engine — so the ask default needs --yes non-interactively
+	// even for a GET. The mock's header enforcement (401 on any missing
+	// header -> exit 3) proves the raw passthrough sends all three mandatory
+	// headers too.
+	res := run(t, srv.URL, "", "--yes", "api", "GET", "me")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	if !strings.Contains(res.stdout, "e2e@example.com") {
+		t.Errorf("api GET me output missing email; got:\n%s", res.stdout)
+	}
+}
+
+func TestConfigListLocalOnly(t *testing.T) {
+	// config list resolves layered settings locally: point the CLI at a dead
+	// URL to prove no network round-trip and no auth resolution are needed.
+	res := run(t, "http://127.0.0.1:1", "", "config", "list")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	if strings.TrimSpace(res.stdout) == "" {
+		t.Fatal("config list produced empty stdout")
+	}
+	for _, want := range []string{"output", "baseUrl"} {
+		if !strings.Contains(res.stdout, want) {
+			t.Errorf("config list output missing key %q; got:\n%s", want, res.stdout)
+		}
+	}
+}
+
+func TestOutputColumnsPresent(t *testing.T) {
+	_, srv := newMockAPI()
+	defer srv.Close()
+
+	res := run(t, srv.URL, "", "blueprint", "list")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	lines := strings.Split(strings.TrimSpace(res.stdout), "\n")
+	if len(lines) == 0 {
+		t.Fatal("blueprint list produced no output lines")
+	}
+	// blueprint list renders columns ID, TITLE, STATUS, STEPS, UPDATED
+	// (internal/cli/blueprint.go); the table renderer prints the uppercased
+	// header as the first line.
+	header := lines[0]
+	for _, want := range []string{"ID", "TITLE", "STATUS"} {
+		if !strings.Contains(header, want) {
+			t.Errorf("table header missing column %q; header line: %q", want, header)
+		}
 	}
 }
