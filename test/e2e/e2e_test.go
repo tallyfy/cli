@@ -43,12 +43,13 @@ func TestMain(m *testing.M) {
 const e2eToken = "e2e-token"
 
 type mockAPI struct {
-	mu             sync.Mutex
-	sawGoodHeaders bool
-	runPosts       int
-	deletes        int
-	completePosts  int    // POSTs to /runs/{run}/completed-tasks
-	lastRunBody    string // most recent POST /runs request body
+	mu                sync.Mutex
+	sawGoodHeaders    bool
+	runPosts          int
+	deletes           int
+	completePosts     int    // POSTs to /runs/{run}/completed-tasks
+	lastRunBody       string // most recent POST /runs request body
+	lastChecklistBody string // most recent POST /checklists request body
 }
 
 func newMockAPI() (*mockAPI, *httptest.Server) {
@@ -86,6 +87,18 @@ func (a *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 404, `{"error":true,"message":"blueprint not found"}`)
 	case r.Method == "GET" && path == "/organizations/org_test/checklists/bp_1":
 		writeJSON(w, 200, `{"data":{"id":"bp_1","title":"Onboarding","status":"published"}}`)
+	case r.Method == "POST" && path == "/organizations/org_test/checklists":
+		// The real API requires a "type" field on create; mirror that so the
+		// suite catches a regression if the create body drops it.
+		body := readBody(r)
+		a.mu.Lock()
+		a.lastChecklistBody = body
+		a.mu.Unlock()
+		if !strings.Contains(body, `"type"`) {
+			writeJSON(w, 422, `{"error":true,"message":"The type field is required."}`)
+			return
+		}
+		writeJSON(w, 201, `{"data":{"id":"bp_new","title":"Created","status":"draft"}}`)
 	case r.Method == "DELETE" && strings.HasPrefix(path, "/organizations/org_test/checklists/"):
 		a.mu.Lock()
 		a.deletes++
@@ -225,6 +238,26 @@ func TestExitNotFound(t *testing.T) {
 	res := run(t, srv.URL, "", "blueprint", "get", "bp_404")
 	if res.code != 5 {
 		t.Fatalf("exit = %d, want 5 (not found); stderr=%s", res.code, res.stderr)
+	}
+}
+
+// TestBlueprintCreateSendsType guards the fix for the real-API requirement that
+// a checklist create include a "type" field (found by the live staging suite).
+func TestBlueprintCreateSendsType(t *testing.T) {
+	api, srv := newMockAPI()
+	defer srv.Close()
+	res := run(t, srv.URL, "", "--yes", "blueprint", "create", "--title", "Q3 rollout")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	body := api.lastChecklistBody
+	api.mu.Unlock()
+	if !strings.Contains(body, `"type"`) {
+		t.Errorf("create body did not include a type field: %s", body)
+	}
+	if !strings.Contains(body, `"procedure"`) {
+		t.Errorf("create body did not default type to procedure: %s", body)
 	}
 }
 

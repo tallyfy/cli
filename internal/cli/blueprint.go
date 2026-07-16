@@ -154,8 +154,9 @@ func blueprintCreateCmd() *cobra.Command {
 			fromFile, _ := cmd.Flags().GetString("from-file")
 			title, _ := cmd.Flags().GetString("title")
 			summary, _ := cmd.Flags().GetString("summary")
+			bpType, _ := cmd.Flags().GetString("type")
 
-			payload, err := blueprintWriteBody(fromFile, title, summary, "--title is required (or use --from-file)")
+			payload, err := blueprintWriteBody(fromFile, title, summary, bpType, "--title is required (or use --from-file)")
 			if err != nil {
 				return err
 			}
@@ -175,6 +176,7 @@ func blueprintCreateCmd() *cobra.Command {
 	}
 	cmd.Flags().String("title", "", "blueprint title")
 	cmd.Flags().String("summary", "", "blueprint summary")
+	cmd.Flags().String("type", "procedure", "blueprint type: procedure, form, or document")
 	cmd.Flags().String("from-file", "", "read the full JSON body from a file (\"-\" for stdin)")
 	return cmd
 }
@@ -194,7 +196,7 @@ func blueprintUpdateCmd() *cobra.Command {
 			title, _ := cmd.Flags().GetString("title")
 			summary, _ := cmd.Flags().GetString("summary")
 
-			payload, err := blueprintWriteBody(fromFile, title, summary, "provide --title, --summary, or --from-file")
+			payload, err := blueprintWriteBody(fromFile, title, summary, "", "provide --title, --summary, or --from-file")
 			if err != nil {
 				return err
 			}
@@ -600,9 +602,12 @@ func blueprintContext(cmd *cobra.Command) (*Context, string, error) {
 }
 
 // blueprintWriteBody builds a create/update payload: the raw file body when
-// --from-file is set, otherwise a {title,summary} object. missingMsg is the
-// usage error when neither a file nor any field is supplied.
-func blueprintWriteBody(fromFile, title, summary, missingMsg string) (json.RawMessage, error) {
+// --from-file is set, otherwise a {title,summary[,type]} object. missingMsg is
+// the usage error when neither a file nor any field is supplied. checklistType,
+// when non-empty, is added as the required "type" field (create only; the API
+// rejects a create without it). It is appended after the required-field check
+// so it does not, by itself, satisfy that check.
+func blueprintWriteBody(fromFile, title, summary, checklistType, missingMsg string) (json.RawMessage, error) {
 	if fromFile != "" {
 		data, err := readInput(fromFile)
 		if err != nil {
@@ -622,6 +627,9 @@ func blueprintWriteBody(fromFile, title, summary, missingMsg string) (json.RawMe
 	}
 	if len(body) == 0 {
 		return nil, &UsageError{Msg: missingMsg}
+	}
+	if checklistType != "" {
+		body["type"] = checklistType
 	}
 	return json.Marshal(body)
 }
