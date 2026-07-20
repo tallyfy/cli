@@ -133,6 +133,31 @@ type Blueprint struct {
 	Raw         json.RawMessage `json:"-"` // full payload for export round-trips
 }
 
+// KickoffOption is one choice on a radio/dropdown/multiselect kick-off field,
+// or one column on a table field. The API emits option ids as numbers, so the
+// id is kept as raw JSON and echoed back in exactly the form it arrived in.
+type KickoffOption struct {
+	ID    json.RawMessage `json:"id"`
+	Text  string          `json:"text"`
+	Label string          `json:"label"` // table columns carry label, not text
+}
+
+// KickoffField is one kick-off form field ("prerun") on a blueprint.
+//
+// ID is the field's timeline_id, and it is THE key a launch body's "prerun"
+// object must use: api-v2 resolves each supplied key with
+// allKickOffFields()->firstWhere('timeline_id', $key) and skips anything it
+// cannot find, so a key that is not a timeline_id is dropped silently
+// (App\Http\Requests\Runs\RunRequestValidator::validatePrerun).
+type KickoffField struct {
+	ID        string          `json:"id"`
+	Alias     string          `json:"alias"`
+	Label     string          `json:"label"`
+	FieldType string          `json:"field_type"`
+	Options   []KickoffOption `json:"options"`
+	Columns   []KickoffOption `json:"columns"`
+}
+
 // Process (API name: run) is a launched instance of a blueprint.
 type Process struct {
 	ID           string          `json:"id"`

@@ -229,7 +229,7 @@ func TestProcessLaunchPayload(t *testing.T) {
 		name        string
 		blueprintID string
 		procName    string
-		fields      map[string]string
+		prerun      map[string]any
 		want        map[string]any
 	}{
 		{
@@ -238,9 +238,9 @@ func TestProcessLaunchPayload(t *testing.T) {
 			want:        map[string]any{"checklist_id": "bp-123"},
 		},
 		{
-			name:        "empty fields map omits prerun",
+			name:        "empty prerun map omits prerun",
 			blueprintID: "bp-123",
-			fields:      map[string]string{},
+			prerun:      map[string]any{},
 			want:        map[string]any{"checklist_id": "bp-123"},
 		},
 		{
@@ -250,23 +250,28 @@ func TestProcessLaunchPayload(t *testing.T) {
 			want:        map[string]any{"checklist_id": "bp-123", "name": "Q3 onboarding"},
 		},
 		{
-			name:        "fields nested under prerun",
+			// prerun is keyed by timeline_id, never by the label or alias the
+			// user typed: api-v2 matches on timeline_id and drops the rest.
+			name:        "values nested under prerun, keyed by timeline_id",
 			blueprintID: "bp-123",
 			procName:    "Q3 onboarding",
-			fields:      map[string]string{"start_date": "2026-07-01", "manager": ""},
+			prerun: map[string]any{
+				"3b4a35ae538e797601305bc406839bbf": "2026-07-01",
+				"bbd6a81fbb1da0b90610bf9560da339d": "",
+			},
 			want: map[string]any{
 				"checklist_id": "bp-123",
 				"name":         "Q3 onboarding",
 				"prerun": map[string]any{
-					"start_date": "2026-07-01",
-					"manager":    "",
+					"3b4a35ae538e797601305bc406839bbf": "2026-07-01",
+					"bbd6a81fbb1da0b90610bf9560da339d": "",
 				},
 			},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			raw, err := processLaunchPayload(tc.blueprintID, tc.procName, tc.fields)
+			raw, err := processLaunchPayload(tc.blueprintID, tc.procName, tc.prerun)
 			if err != nil {
 				t.Fatalf("processLaunchPayload error: %v", err)
 			}

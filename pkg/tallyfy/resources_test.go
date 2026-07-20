@@ -183,6 +183,45 @@ func TestResourceMethods(t *testing.T) {
 			wantMethod: "GET", wantPath: "/organizations/org1/checklists/b1/steps",
 		},
 		{
+			// "id" is the field's timeline_id, and option ids arrive as
+			// numbers - both are what the launch payload has to echo back.
+			name: "GetKickoffFields decodes the inline prerun array",
+			resp: itemResp(`{"id":"b1","prerun":[{"id":"tl-1","alias":"dd-ko-1","label":"DD KO","field_type":"dropdown","options":[{"id":1,"text":"YES","value":null}]}]}`),
+			invoke: func(c *Client) error {
+				fields, err := c.GetKickoffFields(ctx, "org1", "b1")
+				if err != nil {
+					return err
+				}
+				if len(fields) != 1 {
+					return fmt.Errorf("fields = %+v, want 1", fields)
+				}
+				f := fields[0]
+				if f.ID != "tl-1" || f.Alias != "dd-ko-1" || f.Label != "DD KO" || f.FieldType != "dropdown" {
+					return fmt.Errorf("field = %+v", f)
+				}
+				if len(f.Options) != 1 || string(f.Options[0].ID) != "1" || f.Options[0].Text != "YES" {
+					return fmt.Errorf("options = %+v", f.Options)
+				}
+				return nil
+			},
+			wantMethod: "GET", wantPath: "/organizations/org1/checklists/b1",
+		},
+		{
+			name: "GetKickoffFields tolerates a blueprint with no kick-off form",
+			resp: itemResp(`{"id":"b1"}`),
+			invoke: func(c *Client) error {
+				fields, err := c.GetKickoffFields(ctx, "org1", "b1")
+				if err != nil {
+					return err
+				}
+				if len(fields) != 0 {
+					return fmt.Errorf("fields = %+v, want none", fields)
+				}
+				return nil
+			},
+			wantMethod: "GET", wantPath: "/organizations/org1/checklists/b1",
+		},
+		{
 			name: "ListAutomations extracts inline field",
 			resp: itemResp(`{"id":"b1","automated_actions":[{"id":"aa1"}]}`),
 			invoke: func(c *Client) error {

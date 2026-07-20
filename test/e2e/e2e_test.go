@@ -47,9 +47,11 @@ type mockAPI struct {
 	sawGoodHeaders    bool
 	runPosts          int
 	deletes           int
-	completePosts     int    // POSTs to /runs/{run}/completed-tasks
-	lastRunBody       string // most recent POST /runs request body
-	lastChecklistBody string // most recent POST /checklists request body
+	completePosts     int      // POSTs to /runs/{run}/completed-tasks
+	koFetches         int      // GETs of bp_1 (the kick-off field lookup)
+	lastRunBody       string   // most recent POST /runs request body
+	runBodies         []string // every POST /runs request body, in order
+	lastChecklistBody string   // most recent POST /checklists request body
 }
 
 func newMockAPI() (*mockAPI, *httptest.Server) {
@@ -86,7 +88,15 @@ func (a *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 	case r.Method == "GET" && path == "/organizations/org_test/checklists/bp_404":
 		writeJSON(w, 404, `{"error":true,"message":"blueprint not found"}`)
 	case r.Method == "GET" && path == "/organizations/org_test/checklists/bp_1":
-		writeJSON(w, 200, `{"data":{"id":"bp_1","title":"Onboarding","status":"published"}}`)
+		// "prerun" carries the kick-off fields, keyed by timeline_id, exactly
+		// as the live API emits them (option ids are numbers).
+		a.mu.Lock()
+		a.koFetches++
+		a.mu.Unlock()
+		writeJSON(w, 200, `{"data":{"id":"bp_1","title":"Onboarding","status":"published","prerun":[`+
+			`{"id":"tl_dept","alias":"dept-1","label":"Department","field_type":"text","options":[]},`+
+			`{"id":"tl_prio","alias":"priority-1","label":"Priority","field_type":"dropdown","options":[{"id":1,"text":"High","value":null},{"id":2,"text":"Normal","value":null}]}`+
+			`]}}`)
 	case r.Method == "POST" && path == "/organizations/org_test/checklists":
 		// The real API requires a "type" field on create; mirror that so the
 		// suite catches a regression if the create body drops it.
@@ -109,6 +119,7 @@ func (a *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		a.runPosts++
 		a.lastRunBody = body
+		a.runBodies = append(a.runBodies, body)
 		a.mu.Unlock()
 		// Rows whose name contains "fail" get a 422 (drives the bulk-partial test).
 		if strings.Contains(strings.ToLower(body), "fail") {
@@ -334,6 +345,121 @@ func TestBulkPartialExit9(t *testing.T) {
 	defer api.mu.Unlock()
 	if api.runPosts != 3 {
 		t.Errorf("bulk launch made %d POSTs, want 3 (one per row)", api.runPosts)
+	}
+}
+
+// TestBulkLaunchResolvesKickoffFieldsOnce covers the data-loss bug this suite
+// exists to prevent: CSV headers naming kick-off fields must reach the API as
+// the fields' timeline_ids (api-v2 matches on timeline_id and silently drops
+// anything else), typed per field_type, with ONE field lookup for the batch.
+func TestBulkLaunchResolvesKickoffFieldsOnce(t *testing.T) {
+	api, srv := newMockAPI()
+	defer srv.Close()
+
+	// "Department" is a label, "priority-1" is an alias: both must resolve.
+	csv := "name,Department,priority-1\nOnboard ACME,Sales,High\nOnboard Beta,Ops,Normal\n"
+	csvPath := filepath.Join(t.TempDir(), "hires.csv")
+	if err := os.WriteFile(csvPath, []byte(csv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := run(t, srv.URL, "",
+		"--settings", `{"permissions":{"allow":["Process(launch)"]}}`,
+		"process", "launch", "--blueprint", "bp_1", "--from-csv", csvPath)
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s\nstdout=%s", res.code, res.stderr, res.stdout)
+	}
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.koFetches != 1 {
+		t.Errorf("kick-off fields fetched %d times, want exactly 1 for the whole CSV", api.koFetches)
+	}
+	if len(api.runBodies) != 2 {
+		t.Fatalf("launched %d processes, want 2", len(api.runBodies))
+	}
+	// Text goes through as a scalar; a dropdown must become {id, text}.
+	for _, want := range []string{`"tl_dept":"Sales"`, `"tl_prio":{"id":1,"text":"High"}`} {
+		if !strings.Contains(api.runBodies[0], want) {
+			t.Errorf("row 1 body missing %s:\n%s", want, api.runBodies[0])
+		}
+	}
+	if !strings.Contains(api.runBodies[1], `"tl_prio":{"id":2,"text":"Normal"}`) {
+		t.Errorf("row 2 body missing the Normal dropdown value:\n%s", api.runBodies[1])
+	}
+	// The header names must never survive into the payload.
+	for _, leaked := range []string{"Department", "priority-1"} {
+		if strings.Contains(api.runBodies[0], `"`+leaked+`":`) {
+			t.Errorf("payload is keyed by %q instead of the field's timeline_id:\n%s", leaked, api.runBodies[0])
+		}
+	}
+}
+
+// TestBulkLaunchUnknownFieldFailsBeforeLaunching proves the silent drop is
+// gone: a header that names no kick-off field stops the batch up front.
+func TestBulkLaunchUnknownFieldFailsBeforeLaunching(t *testing.T) {
+	api, srv := newMockAPI()
+	defer srv.Close()
+
+	csv := "name,customer_email\nOnboard ACME,contact@acme.example\n"
+	csvPath := filepath.Join(t.TempDir(), "hires.csv")
+	if err := os.WriteFile(csvPath, []byte(csv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := run(t, srv.URL, "",
+		"--settings", `{"permissions":{"allow":["Process(launch)"]}}`,
+		"process", "launch", "--blueprint", "bp_1", "--from-csv", csvPath)
+	if res.code != 2 {
+		t.Fatalf("exit = %d, want 2 (usage); stderr=%s", res.code, res.stderr)
+	}
+	// The message must name the bad header AND list what does exist.
+	for _, want := range []string{`unknown kick-off field "customer_email"`, "Department", "Priority", "id=tl_prio"} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, res.stderr)
+		}
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.runPosts != 0 {
+		t.Errorf("%d process(es) launched despite an unresolvable header; want 0", api.runPosts)
+	}
+}
+
+// TestLaunchRejectsInvalidDropdownValue keeps the option check honest: a value
+// that is not one of the field's options must be refused with the valid set.
+func TestLaunchRejectsInvalidDropdownValue(t *testing.T) {
+	api, srv := newMockAPI()
+	defer srv.Close()
+
+	res := run(t, srv.URL, "", "--yes",
+		"process", "launch", "--blueprint", "bp_1", "--name", "Solo",
+		"--field", "Priority=Urgent")
+	if res.code != 2 {
+		t.Fatalf("exit = %d, want 2 (usage); stderr=%s", res.code, res.stderr)
+	}
+	if !strings.Contains(res.stderr, `choose one of "High", "Normal"`) {
+		t.Errorf("stderr should list the valid options:\n%s", res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.runPosts != 0 {
+		t.Errorf("%d process(es) launched despite an invalid option; want 0", api.runPosts)
+	}
+}
+
+// TestLaunchWithoutFieldsSkipsLookup keeps the extra API call opt-in: a launch
+// that sets no kick-off values must not pay for a field lookup.
+func TestLaunchWithoutFieldsSkipsLookup(t *testing.T) {
+	api, srv := newMockAPI()
+	defer srv.Close()
+
+	res := run(t, srv.URL, "", "--yes", "process", "launch", "--blueprint", "bp_1", "--name", "Solo")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.koFetches != 0 {
+		t.Errorf("kick-off fields fetched %d time(s) for a launch with no fields; want 0", api.koFetches)
 	}
 }
 

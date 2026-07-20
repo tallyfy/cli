@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -126,14 +127,32 @@ func processLaunchCmd() *cobra.Command {
 
 Single:
   tallyfy process launch --blueprint <id> --name "Q3 onboarding" \
-    --field start_date=2026-07-01 --field manager=jo@example.com
+    --field "Start date=2026-07-01" --field "Manager=jo@example.com"
 
 Bulk (one process per CSV row):
   tallyfy process launch --blueprint <id> --from-csv new-hires.csv
 
-The CSV's header row names the kickoff fields; a "name" column (if present)
-sets each process name and every other column is a kickoff field. Use
---dry-run to preview without launching.
+Kick-off fields
+  Name a field by its label, its alias, or its field ID. The CLI reads the
+  blueprint's kick-off form once (reused across every CSV row) and sends each
+  value under the field ID the API matches on. A name that matches no field
+  stops the launch and prints the fields that do exist, so nothing is ever
+  launched with a value silently dropped.
+
+  Values follow the field's type:
+    text, textarea, email, date   the value as typed
+    radio                         the option's text, e.g. --field Priority=High
+    dropdown                      the option's text (sent as its id and text)
+    multiselect                   comma-separated option texts, or a JSON array
+    table                         a JSON array with one entry per column
+    assignees_form                comma-separated emails (org members become
+                                  users, anyone else becomes a guest), or a
+                                  JSON object of users/guests/groups
+
+CSV
+  The header row names the kick-off fields exactly as --field does; a "name"
+  column (if present) sets each process name. Use --dry-run to resolve every
+  header and print the exact request body per row without launching anything.
 
 Idempotency: launch has no dedupe key in v1 - re-running a CSV launches the
 processes again. Guard against duplicates upstream (e.g. track launched rows).`,
@@ -161,7 +180,7 @@ processes again. Guard against duplicates upstream (e.g. track launched rows).`,
 	}
 	cmd.Flags().String("blueprint", "", "blueprint (checklist) ID to launch (required)")
 	cmd.Flags().String("name", "", "process name")
-	cmd.Flags().StringArray("field", nil, "kickoff field as key=value (repeatable)")
+	cmd.Flags().StringArray("field", nil, "kick-off field as name=value, where name is the field's label, alias or ID (repeatable)")
 	cmd.Flags().String("from-csv", "", "launch one process per row of this CSV file")
 	return cmd
 }
@@ -294,7 +313,13 @@ func processExportCmd() *cobra.Command {
 // --- launch helpers ---------------------------------------------------------
 
 func processLaunchSingle(cmd *cobra.Command, ctx *Context, org, blueprintID, name string, fields map[string]string) error {
-	payload, err := processLaunchPayload(blueprintID, name, fields)
+	// Resolve and encode before Guard: a typo should fail without firing a
+	// PreLaunch hook for a launch that was never going to happen.
+	resolved, members, err := prepareKickoff(cmd, ctx, org, blueprintID, sortedKeys(fields))
+	if err != nil {
+		return err
+	}
+	payload, err := kickoffLaunchPayload(blueprintID, name, fields, resolved, members)
 	if err != nil {
 		return err
 	}
@@ -334,14 +359,32 @@ func processLaunchBulk(cmd *cobra.Command, ctx *Context, org, blueprintID, csvPa
 	}
 	dataRows := records[1:]
 
+	// The header names the same kick-off fields for every row, so resolve it
+	// ONCE here: one lookup per command, not one per row. An unresolvable
+	// header aborts before any row is launched.
+	resolved, members, err := prepareKickoff(cmd, ctx, org, blueprintID, csvFieldHeaders(header, nameIdx))
+	if err != nil {
+		return err
+	}
+
 	if err := ctx.Guard("Process", "launch", hooks.PreLaunch, hooks.Payload{Resource: "process", ID: blueprintID}); err != nil {
 		return err
 	}
 
 	if ctx.DryRun {
-		for _, rec := range dataRows {
+		failed := 0
+		for i, rec := range dataRows {
 			name, fields := csvRowFields(header, rec, nameIdx)
-			ctx.DryRunf("POST /organizations/%s/runs checklist_id=%s name=%q fields=%v", org, blueprintID, name, fields)
+			payload, perr := kickoffLaunchPayload(blueprintID, name, fields, resolved, members)
+			if perr != nil {
+				failed++
+				ctx.DryRunf("row %d WOULD FAIL: %s", i+2, perr.Error())
+				continue
+			}
+			ctx.DryRunf("POST /organizations/%s/runs %s", org, string(payload))
+		}
+		if failed > 0 {
+			return &BulkPartialError{Succeeded: len(dataRows) - failed, Failed: failed, Total: len(dataRows)}
 		}
 		return nil
 	}
@@ -353,7 +396,7 @@ func processLaunchBulk(cmd *cobra.Command, ctx *Context, org, blueprintID, csvPa
 	for i, rec := range dataRows {
 		rowNum := i + 2 // 1-based, accounting for the header row
 		name, fields := csvRowFields(header, rec, nameIdx)
-		payload, perr := processLaunchPayload(blueprintID, name, fields)
+		payload, perr := kickoffLaunchPayload(blueprintID, name, fields, resolved, members)
 		if perr == nil {
 			var p *tallyfy.Process
 			p, perr = ctx.API.LaunchProcess(cmd.Context(), org, payload)
@@ -382,21 +425,85 @@ func processLaunchBulk(cmd *cobra.Command, ctx *Context, org, blueprintID, csvPa
 	return nil
 }
 
+// prepareKickoff fetches the blueprint's kick-off fields ONCE, resolves every
+// supplied key to its field, and (only when an assignees_form field is in
+// play) indexes the org's members by email. A launch that sets no kick-off
+// values costs no extra API call at all.
+func prepareKickoff(cmd *cobra.Command, ctx *Context, org, blueprintID string, keys []string) (map[string]tallyfy.KickoffField, map[string]json.Number, error) {
+	if len(keys) == 0 {
+		return nil, nil, nil
+	}
+	fields, err := ctx.API.GetKickoffFields(cmd.Context(), org, blueprintID)
+	if err != nil {
+		return nil, nil, err
+	}
+	resolved, err := resolveKickoffKeys(fields, blueprintID, keys)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !kickoffNeedsMembers(resolved) {
+		return resolved, nil, nil
+	}
+	users, _, err := ctx.API.ListUsers(cmd.Context(), org, tallyfy.ListOptions{All: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	members := make(map[string]json.Number, len(users))
+	for _, u := range users {
+		if u.Email != "" {
+			members[strings.ToLower(u.Email)] = u.ID
+		}
+	}
+	return resolved, members, nil
+}
+
+// kickoffLaunchPayload encodes one row/invocation's raw values and builds the
+// launch body from them.
+func kickoffLaunchPayload(blueprintID, name string, fields map[string]string, resolved map[string]tallyfy.KickoffField, members map[string]json.Number) (json.RawMessage, error) {
+	prerun, err := encodePrerun(resolved, fields, members)
+	if err != nil {
+		return nil, err
+	}
+	return processLaunchPayload(blueprintID, name, prerun)
+}
+
 // processLaunchPayload builds a createRunInput body: checklist_id (required),
-// optional name, and kickoff fields under "prerun" as an id->value object.
-func processLaunchPayload(blueprintID, name string, fields map[string]string) (json.RawMessage, error) {
+// optional name, and kick-off values under "prerun", keyed by each field's
+// timeline_id (see kickoff.go for why that key is the one that matters).
+func processLaunchPayload(blueprintID, name string, prerun map[string]any) (json.RawMessage, error) {
 	body := map[string]any{"checklist_id": blueprintID}
 	if name != "" {
 		body["name"] = name
 	}
-	if len(fields) > 0 {
-		prerun := make(map[string]string, len(fields))
-		for k, v := range fields {
-			prerun[k] = v
-		}
+	if len(prerun) > 0 {
 		body["prerun"] = prerun
 	}
 	return json.Marshal(body)
+}
+
+// csvFieldHeaders lists the kick-off field keys a CSV header names, applying
+// the same trim/skip rules csvRowFields uses when reading each row.
+func csvFieldHeaders(header []string, nameIdx int) []string {
+	out := make([]string, 0, len(header))
+	for i, h := range header {
+		if i == nameIdx {
+			continue
+		}
+		if key := strings.TrimSpace(h); key != "" {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// sortedKeys returns a map's keys in a stable order.
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // csvRowFields splits one CSV record into the process name (from the "name"

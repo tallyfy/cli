@@ -161,6 +161,24 @@ func (c *Client) GetBlueprintSteps(ctx context.Context, org, id string) (json.Ra
 	return doData(ctx, c, http.MethodGet, orgPath(org, "checklists", id, "steps"), nil, nil)
 }
 
+// GetKickoffFields returns a template's kick-off form fields.
+//
+// There is no dedicated route for them: ChecklistTransformer always inlines
+// "prerun" (it is a plain transform key, not a ?with= include), so this
+// fetches the checklist and extracts that array.
+// GET /organizations/{org}/checklists/{id}
+func (c *Client) GetKickoffFields(ctx context.Context, org, blueprintID string) ([]KickoffField, error) {
+	var env struct {
+		Data struct {
+			Prerun []KickoffField `json:"prerun"`
+		} `json:"data"`
+	}
+	if _, err := c.Do(ctx, http.MethodGet, orgPath(org, "checklists", blueprintID), nil, nil, &env); err != nil {
+		return nil, err
+	}
+	return env.Data.Prerun, nil
+}
+
 // --- automations (automated-actions) -----------------------------------------
 
 // ListAutomations returns a template's automated actions as raw JSON.
