@@ -27,6 +27,11 @@ import (
 //     exactly, a radio needs that same text as a bare scalar, a multiselect
 //     needs a list of {id, text}, and a table needs one entry per column.
 //     Sending a bare string where an object is required fails validation.
+//
+//     A file field is the exception that bites hardest: FormValuesValidator
+//     has NO file arm, so a wrong shape is not caught here at all. It reaches
+//     Task::updateCaptureValues, which foreachs the value, and a bare string
+//     becomes a 500 rather than a 422. See encodeKickoffFile.
 
 // kickoffMatchRank ranks how a user-supplied key matched a field. Lower is a
 // stronger match; exact beats case-insensitive, and id beats alias beats label.
@@ -234,12 +239,163 @@ func encodeKickoffValue(f tallyfy.KickoffField, raw string, members map[string]j
 	case "table":
 		return encodeKickoffTable(f, raw)
 
+	case "file":
+		return encodeKickoffFile(f, raw)
+
 	case "assignees_form":
 		return encodeKickoffAssignees(f, raw, members)
 	}
-	// text, textarea, email, date, file and any type added later go through as
-	// the scalar the user typed.
+	// text, textarea, email, date and any type added later go through as the
+	// scalar the user typed. api-v2's full set is text, textarea, radio,
+	// dropdown, multiselect, date, email, file, table, assignees_form
+	// (BaseCapture::$field_types), so every non-scalar type is handled above.
 	return raw, nil
+}
+
+// encodeKickoffFile builds the list-of-objects shape a file field requires.
+//
+// This is not cosmetic. Nothing validates a file value on the way in -
+// FormValuesValidator has no `file` arm at all - so a wrong shape is not
+// rejected with a clean 422, it reaches storage and throws. Task::
+// updateCaptureValues does `foreach ($payload as $item)` over the value, so
+// the URL a user naturally types is a hard 500 ("foreach() argument must be
+// of type array|object, string given"), and RunsRepository::captureRunValue
+// foreachs the same value again on the prerun path.
+//
+// The object mirrors the two shipped connectors (middleware processFieldValue,
+// migrator prerun_encoder) and api-v2's own Swagger for form_value:
+//
+//   - filename is what every consumer reads - exports (RunsRepository),
+//     rule evaluation (CaptureTypeFactory plucks it), and rendering
+//     (replaceVariableForFile, is_image). A `name` key is read nowhere.
+//   - url is what api-v2 expands into full_url on store.
+//   - source marks the file as referenced by URL rather than uploaded; it
+//     gates the file-updated-activity event in Task::updateCaptureValues.
+//
+// api-v2 adds full_url and uploaded_at itself, so neither is sent.
+func encodeKickoffFile(f tallyfy.KickoffField, raw string) (any, error) {
+	trimmed := strings.TrimSpace(raw)
+
+	// A JSON array or object is taken as already being in the API's shape, so
+	// a value read out of an export can be launched straight back in. Each
+	// entry is still checked, because a list of bare strings would reach the
+	// same foreach and fail on Arr::has() instead.
+	if strings.HasPrefix(trimmed, "[") || strings.HasPrefix(trimmed, "{") {
+		return encodeKickoffFileJSON(f, trimmed)
+	}
+
+	// Otherwise the value is one URL, or several separated by commas.
+	urls := splitKickoffList(raw)
+	if len(urls) == 0 {
+		return "", nil
+	}
+	out := make([]map[string]any, 0, len(urls))
+	for _, u := range urls {
+		out = append(out, kickoffFileValue(u))
+	}
+	return out, nil
+}
+
+// encodeKickoffFileJSON handles a file value the user supplied as JSON: a list
+// of file objects, a single object, or a list of URL strings.
+func encodeKickoffFileJSON(f tallyfy.KickoffField, trimmed string) (any, error) {
+	if strings.HasPrefix(trimmed, "{") {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+			return nil, &UsageError{Msg: fmt.Sprintf(
+				"kick-off field %q (file) is not valid JSON: %v", kickoffFieldName(f), err)}
+		}
+		if err := checkKickoffFileObject(f, obj); err != nil {
+			return nil, err
+		}
+		// Always a list: the API foreachs this value.
+		return []map[string]json.RawMessage{obj}, nil
+	}
+
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &items); err != nil {
+		return nil, &UsageError{Msg: fmt.Sprintf(
+			"kick-off field %q (file) is not valid JSON: %v", kickoffFieldName(f), err)}
+	}
+	out := make([]any, 0, len(items))
+	for _, item := range items {
+		switch first := firstJSONByte(item); first {
+		case '"':
+			var u string
+			if err := json.Unmarshal(item, &u); err != nil {
+				return nil, &UsageError{Msg: fmt.Sprintf(
+					"kick-off field %q (file) has an unreadable entry: %v", kickoffFieldName(f), err)}
+			}
+			out = append(out, kickoffFileValue(u))
+		case '{':
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(item, &obj); err != nil {
+				return nil, &UsageError{Msg: fmt.Sprintf(
+					"kick-off field %q (file) has an unreadable entry: %v", kickoffFieldName(f), err)}
+			}
+			if err := checkKickoffFileObject(f, obj); err != nil {
+				return nil, err
+			}
+			out = append(out, obj)
+		default:
+			return nil, &UsageError{Msg: fmt.Sprintf(
+				"kick-off field %q (file) needs each entry to be a URL string or a file object, but got %s",
+				kickoffFieldName(f), string(item))}
+		}
+	}
+	return out, nil
+}
+
+// firstJSONByte is the first non-space byte of a JSON value, or 0 if empty.
+func firstJSONByte(b json.RawMessage) byte {
+	if t := strings.TrimSpace(string(b)); t != "" {
+		return t[0]
+	}
+	return 0
+}
+
+// checkKickoffFileObject rejects a file object api-v2 could not use. url is
+// what becomes full_url; an already-enriched object carrying full_url is
+// passed through untouched by Task::updateCaptureValues, so either key alone
+// is enough.
+func checkKickoffFileObject(f tallyfy.KickoffField, obj map[string]json.RawMessage) error {
+	if _, ok := obj["url"]; ok {
+		return nil
+	}
+	if _, ok := obj["full_url"]; ok {
+		return nil
+	}
+	return &UsageError{Msg: fmt.Sprintf(
+		"kick-off field %q (file) needs a %q on every file object", kickoffFieldName(f), "url")}
+}
+
+// kickoffFileValue wraps one URL in the object api-v2 stores.
+func kickoffFileValue(url string) map[string]any {
+	return map[string]any{
+		"filename": kickoffFileName(url),
+		"source":   "url",
+		"url":      url,
+	}
+}
+
+// kickoffFileName is the last path segment of a URL, matching the connectors'
+// value.split('/').pop(). Deliberately stricter than they are in one respect:
+// a query string or fragment is trimmed first, so a signed URL yields
+// "report.pdf" rather than "report.pdf?X-Amz-Signature=...". That name is what
+// users see wherever the field is rendered or exported.
+func kickoffFileName(url string) string {
+	s := url
+	if i := strings.IndexAny(s, "?#"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimRight(s, "/")
+	if i := strings.LastIndex(s, "/"); i >= 0 {
+		s = s[i+1:]
+	}
+	if s == "" {
+		return url
+	}
+	return s
 }
 
 // kickoffOptionValue is the {id, text} pair api-v2 requires for dropdown and

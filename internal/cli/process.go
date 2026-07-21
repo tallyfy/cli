@@ -145,6 +145,11 @@ Kick-off fields
     dropdown                      the option's text (sent as its id and text)
     multiselect                   comma-separated option texts, or a JSON array
     table                         a JSON array with one entry per column
+    file                          a file URL, or several separated by commas.
+                                  The name shown is the URL's last path
+                                  segment. A JSON array of file objects is
+                                  accepted too, for values copied out of an
+                                  export
     assignees_form                comma-separated emails (org members become
                                   users, anyone else becomes a guest), or a
                                   JSON object of users/guests/groups

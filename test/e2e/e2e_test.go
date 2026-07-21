@@ -95,7 +95,8 @@ func (a *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 		a.mu.Unlock()
 		writeJSON(w, 200, `{"data":{"id":"bp_1","title":"Onboarding","status":"published","prerun":[`+
 			`{"id":"tl_dept","alias":"dept-1","label":"Department","field_type":"text","options":[]},`+
-			`{"id":"tl_prio","alias":"priority-1","label":"Priority","field_type":"dropdown","options":[{"id":1,"text":"High","value":null},{"id":2,"text":"Normal","value":null}]}`+
+			`{"id":"tl_prio","alias":"priority-1","label":"Priority","field_type":"dropdown","options":[{"id":1,"text":"High","value":null},{"id":2,"text":"Normal","value":null}]},`+
+			`{"id":"tl_doc","alias":"contract-1","label":"Contract","field_type":"file","options":[]}`+
 			`]}}`)
 	case r.Method == "POST" && path == "/organizations/org_test/checklists":
 		// The real API requires a "type" field on create; mirror that so the
@@ -352,6 +353,45 @@ func TestBulkPartialExit9(t *testing.T) {
 // exists to prevent: CSV headers naming kick-off fields must reach the API as
 // the fields' timeline_ids (api-v2 matches on timeline_id and silently drops
 // anything else), typed per field_type, with ONE field lookup for the batch.
+// TestLaunchFileFieldSendsObjectList checks the shape that actually goes over
+// the wire for a file field, through the compiled binary rather than the
+// encoder alone.
+//
+// A file value sent as the bare URL a user types is not a clean 422: nothing
+// validates it (FormValuesValidator has no file arm), so it reaches
+// Task::updateCaptureValues, whose `foreach ($payload as $item)` dies with
+// "foreach() argument must be of type array|object, string given". That was a
+// hard 500 for anyone filling a file kick-off field in v0.1.1.
+func TestLaunchFileFieldSendsObjectList(t *testing.T) {
+	api, srv := newMockAPI()
+	defer srv.Close()
+
+	res := run(t, srv.URL, "",
+		"--settings", `{"permissions":{"allow":["Process(launch)"]}}`,
+		"process", "launch", "--blueprint", "bp_1", "--name", "Solo",
+		"--field", "Contract=https://cdn.example.com/docs/signed.pdf?sig=abc")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s\nstdout=%s", res.code, res.stderr, res.stdout)
+	}
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if len(api.runBodies) != 1 {
+		t.Fatalf("launched %d processes, want 1", len(api.runBodies))
+	}
+	body := api.runBodies[0]
+
+	// The bare-scalar form is the bug. Assert on it directly so a regression
+	// names itself rather than showing up as a 500 in production.
+	if strings.Contains(body, `"tl_doc":"`) {
+		t.Errorf("file field went out as a bare scalar - this 500s api-v2:\n%s", body)
+	}
+	want := `"tl_doc":[{"filename":"signed.pdf","source":"url","url":"https://cdn.example.com/docs/signed.pdf?sig=abc"}]`
+	if !strings.Contains(body, want) {
+		t.Errorf("body missing %s:\n%s", want, body)
+	}
+}
+
 func TestBulkLaunchResolvesKickoffFieldsOnce(t *testing.T) {
 	api, srv := newMockAPI()
 	defer srv.Close()

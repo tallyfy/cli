@@ -54,7 +54,39 @@ func kickoffFixture() []tallyfy.KickoffField {
 			ID: "8ed941292bf809e597e9e93be679342b", Alias: "assignee-picker-ko-8308346",
 			Label: "ASSIGNEE PICKER KO", FieldType: "assignees_form",
 		},
+		{
+			ID: "5c9a3f1e2d8b47a6913e05f8c2b71d4a", Alias: "file-ko-8308347",
+			Label: "FILE KO", FieldType: "file",
+		},
+		// The remaining scalar types. api-v2's full set is text, textarea,
+		// radio, dropdown, multiselect, date, email, file, table,
+		// assignees_form (BaseCapture::$field_types); with these the fixture
+		// covers all ten, so every type has encoder coverage.
+		{
+			ID: "c1f7b2e6a09d4358bb1e7f30d5a86c92", Alias: "ltf-8308348",
+			Label: "LTF KO", FieldType: "textarea",
+		},
+		{
+			ID: "e4d0c8a51b6f49329a7c2e18f0b3d76e", Alias: "email-ko-8308349",
+			Label: "EMAIL KO", FieldType: "email",
+		},
+		{
+			ID: "f8a25e93c7d14b06821f9a4e6c05b3d7", Alias: "date-ko-8308350",
+			Label: "DATE KO", FieldType: "date",
+		},
 	}
+}
+
+// kickoffField returns the fixture field with the given label.
+func kickoffField(t *testing.T, label string) tallyfy.KickoffField {
+	t.Helper()
+	for _, f := range kickoffFixture() {
+		if f.Label == label {
+			return f
+		}
+	}
+	t.Fatalf("fixture has no field labelled %q", label)
+	return tallyfy.KickoffField{}
 }
 
 func TestResolveKickoffKey(t *testing.T) {
@@ -280,6 +312,227 @@ func TestEncodeKickoffValueErrors(t *testing.T) {
 			_, err := encodeKickoffValue(byLabel[tc.field], tc.raw, nil)
 			if msg := wantUsageError(t, err).Error(); !strings.Contains(msg, tc.wantText) {
 				t.Errorf("error message = %q, want it to contain %q", msg, tc.wantText)
+			}
+		})
+	}
+}
+
+// TestEncodeKickoffFile pins the wire shape of a file value. It asserts on
+// marshalled JSON rather than the Go value because the wire shape is the whole
+// contract: api-v2 foreachs this value, so what matters is that a list of
+// objects leaves the CLI, whatever Go type produced it.
+func TestEncodeKickoffFile(t *testing.T) {
+	f := kickoffField(t, "FILE KO")
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "a bare path becomes a one-entry list",
+			raw:  "uploads/report.pdf",
+			want: `[{"filename":"report.pdf","source":"url","url":"uploads/report.pdf"}]`,
+		},
+		{
+			name: "an absolute URL keeps its last segment as the filename",
+			raw:  "https://cdn.example.com/docs/q3.pdf",
+			want: `[{"filename":"q3.pdf","source":"url","url":"https://cdn.example.com/docs/q3.pdf"}]`,
+		},
+		{
+			// A signed URL is the common real case. The query string is not
+			// part of the name a user should see, but it IS part of the URL
+			// that has to be fetched, so only the filename is trimmed.
+			name: "a signed URL keeps the query but not in the filename",
+			raw:  "https://cdn.example.com/docs/q3.pdf?X-Amz-Signature=abc123",
+			want: `[{"filename":"q3.pdf","source":"url","url":"https://cdn.example.com/docs/q3.pdf?X-Amz-Signature=abc123"}]`,
+		},
+		{
+			name: "several comma-separated URLs become several entries",
+			raw:  "uploads/a.pdf, uploads/b.png",
+			want: `[{"filename":"a.pdf","source":"url","url":"uploads/a.pdf"},` +
+				`{"filename":"b.png","source":"url","url":"uploads/b.png"}]`,
+		},
+		{
+			name: "a JSON array of URLs becomes one entry each",
+			raw:  `["uploads/a.pdf","uploads/b.png"]`,
+			want: `[{"filename":"a.pdf","source":"url","url":"uploads/a.pdf"},` +
+				`{"filename":"b.png","source":"url","url":"uploads/b.png"}]`,
+		},
+		{
+			// So a value read out of an export can be launched straight back
+			// in without being rewritten. Every key survives; only their
+			// order changes, which JSON does not ascribe meaning to.
+			name: "a JSON array of file objects keeps every key",
+			raw:  `[{"url":"uploads/a.pdf","filename":"a.pdf","source":"url"}]`,
+			want: `[{"filename":"a.pdf","source":"url","url":"uploads/a.pdf"}]`,
+		},
+		{
+			name: "a single JSON object is still wrapped in a list",
+			raw:  `{"url":"uploads/a.pdf","filename":"a.pdf"}`,
+			want: `[{"filename":"a.pdf","url":"uploads/a.pdf"}]`,
+		},
+		{
+			// Task::updateCaptureValues passes an already-enriched entry
+			// through untouched when it carries full_url, so url is not
+			// required in that case.
+			name: "an already-enriched object with full_url is accepted",
+			raw:  `[{"full_url":"https://api.example.com/uploads/a.pdf","filename":"a.pdf"}]`,
+			want: `[{"filename":"a.pdf","full_url":"https://api.example.com/uploads/a.pdf"}]`,
+		},
+		{
+			// Matches every other type: an empty cell clears the field, and a
+			// required field still fails its own required check server-side.
+			name: "an empty value stays an empty scalar",
+			raw:  "",
+			want: `""`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := encodeKickoffValue(f, tc.raw, nil)
+			if err != nil {
+				t.Fatalf("encodeKickoffValue error: %v", err)
+			}
+			b, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal error: %v", err)
+			}
+			if string(b) != tc.want {
+				t.Errorf("encoded JSON = %s, want %s", b, tc.want)
+			}
+		})
+	}
+}
+
+// TestEncodeKickoffFileNeverBareScalar is the regression guard for the defect
+// this encoding exists to fix. A file value sent as a bare string is not a
+// clean 422 - FormValuesValidator has no file arm, so nothing rejects it - it
+// reaches Task::updateCaptureValues, which does `foreach ($payload as $item)`
+// and dies with "foreach() argument must be of type array|object, string
+// given". RunsRepository::captureRunValue foreachs the same value again on the
+// prerun path. So whatever a user types, a non-empty file value must leave as
+// a JSON array whose every entry is an object.
+func TestEncodeKickoffFileNeverBareScalar(t *testing.T) {
+	f := kickoffField(t, "FILE KO")
+	raws := []string{
+		"uploads/report.pdf",
+		"https://cdn.example.com/docs/q3.pdf",
+		"https://cdn.example.com/docs/q3.pdf?X-Amz-Signature=abc123",
+		"https://cdn.example.com/docs/q3.pdf#page=2",
+		"uploads/a.pdf, uploads/b.png",
+		`["uploads/a.pdf","uploads/b.png"]`,
+		`[{"url":"uploads/a.pdf","filename":"a.pdf"}]`,
+		`{"url":"uploads/a.pdf","filename":"a.pdf"}`,
+		"  uploads/spaced.pdf  ",
+		"no-extension",
+		"/leading/slash.pdf",
+		"trailing/slash/",
+		"https://cdn.example.com",
+	}
+	for _, raw := range raws {
+		t.Run(raw, func(t *testing.T) {
+			got, err := encodeKickoffValue(f, raw, nil)
+			if err != nil {
+				t.Fatalf("encodeKickoffValue(%q) error: %v", raw, err)
+			}
+			b, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal error: %v", err)
+			}
+			var entries []json.RawMessage
+			if err := json.Unmarshal(b, &entries); err != nil {
+				t.Fatalf("file value %q encoded as %s, which is not a JSON array - api-v2 foreachs this and 500s", raw, b)
+			}
+			if len(entries) == 0 {
+				t.Fatalf("file value %q encoded as an empty array", raw)
+			}
+			for i, e := range entries {
+				if s := strings.TrimSpace(string(e)); !strings.HasPrefix(s, "{") {
+					t.Errorf("entry %d of %q is %s, want a file object - Arr::has() needs an array, not a scalar", i, raw, e)
+				}
+			}
+		})
+	}
+}
+
+func TestEncodeKickoffFileErrors(t *testing.T) {
+	f := kickoffField(t, "FILE KO")
+	tests := []struct {
+		name     string
+		raw      string
+		wantText string
+	}{
+		{
+			name: "a file object with no url at all", raw: `[{"filename":"a.pdf"}]`,
+			wantText: `needs a "url" on every file object`,
+		},
+		{
+			name: "a single object with no url", raw: `{"filename":"a.pdf"}`,
+			wantText: `needs a "url" on every file object`,
+		},
+		{
+			name: "an entry that is neither a URL nor an object", raw: `[42]`,
+			wantText: "needs each entry to be a URL string or a file object",
+		},
+		{
+			name: "malformed JSON", raw: `[{"url":`,
+			wantText: "is not valid JSON",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := encodeKickoffValue(f, tc.raw, nil)
+			if msg := wantUsageError(t, err).Error(); !strings.Contains(msg, tc.wantText) {
+				t.Errorf("error message = %q, want it to contain %q", msg, tc.wantText)
+			}
+		})
+	}
+}
+
+// TestEncodeKickoffScalarTypes covers the types that deliberately pass through
+// untouched, so that a future type added to the switch cannot quietly start
+// wrapping them the way file needed to be wrapped.
+func TestEncodeKickoffScalarTypes(t *testing.T) {
+	cases := map[string]string{
+		"STF KO":   "hello",
+		"LTF KO":   "a longer answer\nwith a newline",
+		"EMAIL KO": "jo@example.com",
+		"DATE KO":  "2026-07-01",
+	}
+	for label, raw := range cases {
+		t.Run(label, func(t *testing.T) {
+			got, err := encodeKickoffValue(kickoffField(t, label), raw, nil)
+			if err != nil {
+				t.Fatalf("encodeKickoffValue error: %v", err)
+			}
+			if got != any(raw) {
+				t.Errorf("encoded = %#v, want the scalar %q unchanged", got, raw)
+			}
+		})
+	}
+}
+
+// TestEncodeKickoffOptionIDStaysNumeric pins the wire type of an option id.
+// api-v2 assigns integer option ids and stores whatever it is sent verbatim,
+// so emitting "1" instead of 1 would store a type that does not match the
+// blueprint's own options. (FormValuesValidator itself accepts either, because
+// PHP casts numeric string array keys, so nothing server-side would complain.)
+func TestEncodeKickoffOptionIDStaysNumeric(t *testing.T) {
+	for label, raw := range map[string]string{"DD KO": "YES", "CHECKLIST KO": "CHK 1"} {
+		t.Run(label, func(t *testing.T) {
+			got, err := encodeKickoffValue(kickoffField(t, label), raw, nil)
+			if err != nil {
+				t.Fatalf("encodeKickoffValue error: %v", err)
+			}
+			b, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal error: %v", err)
+			}
+			if strings.Contains(string(b), `"id":"`) {
+				t.Errorf("encoded JSON = %s, want id as a number, not a quoted string", b)
+			}
+			if !strings.Contains(string(b), `"id":1`) {
+				t.Errorf("encoded JSON = %s, want it to carry the numeric option id", b)
 			}
 		})
 	}
