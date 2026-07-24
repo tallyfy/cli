@@ -28,10 +28,13 @@ import (
 //     needs a list of {id, text}, and a table needs one entry per column.
 //     Sending a bare string where an object is required fails validation.
 //
-//     A file field is the exception that bites hardest: FormValuesValidator
-//     has NO file arm, so a wrong shape is not caught here at all. It reaches
-//     Task::updateCaptureValues, which foreachs the value, and a bare string
-//     becomes a 500 rather than a 422. See encodeKickoffFile.
+//     A file field was the exception that bit hardest: when this encoder was
+//     written FormValuesValidator had NO file arm, so a wrong shape was not
+//     caught at all - it reached Task::updateCaptureValues, which foreachs the
+//     value, and a bare string became a 500 rather than a 422. api-v2 has since
+//     grown one (FormValuesValidator.php:124-158, commit ad5787b92), so that is
+//     now a clean 422; the shape this encoder already sent satisfies it. See
+//     encodeKickoffFile.
 
 // kickoffMatchRank ranks how a user-supplied key matched a field. Lower is a
 // stronger match; exact beats case-insensitive, and id beats alias beats label.
@@ -184,19 +187,50 @@ func encodePrerun(resolved map[string]tallyfy.KickoffField, values map[string]st
 		if err != nil {
 			return nil, err
 		}
+		if _, omit := v.(kickoffOmitted); omit {
+			continue
+		}
 		out[f.ID] = v
+	}
+	if len(out) == 0 {
+		// Everything supplied was omitted, so there is no prerun to send. Match
+		// the no-values case above rather than sending an empty object.
+		return nil, nil
 	}
 	return out, nil
 }
+
+// kickoffOmitted is what encodeKickoffValue returns when the field must be left
+// out of the prerun payload entirely rather than sent with an empty value.
+// encodePrerun drops these; nothing else ever sees one.
+type kickoffOmitted struct{}
 
 // encodeKickoffValue converts a raw CLI/CSV string into the JSON value shape
 // FormValuesValidator requires for the field's type. members maps a lowercased
 // email to that member's id and is consulted only for assignees_form fields.
 func encodeKickoffValue(f tallyfy.KickoffField, raw string, members map[string]json.Number) (any, error) {
-	// An empty cell clears the field. api-v2 accepts an empty value for every
-	// type, and a required field still fails its own required check, so pass
-	// it straight through rather than inventing an empty object or list.
 	if strings.TrimSpace(raw) == "" {
+		// An empty cell clears the field, and a required field still fails its
+		// own required check (RunRequestValidator::preRunValueIsBlank treats a
+		// missing key as blank), so pass the empty scalar straight through
+		// rather than inventing an empty object or list.
+		//
+		// That holds for nine of the ten field types but NOT for table. The
+		// table arm of FormValuesValidator (api-v2
+		// app/Http/Requests/Captures/FormValuesValidator.php:96-104) is the only
+		// one with no empty($values) early-break, so it reaches
+		// `! is_array($values)` with "" and 422s "Invalid table field". An empty
+		// list is no better - it then fails the
+		// `count($values) !== count($capture->columns)` check on the very next
+		// line. The one shape api-v2 accepts for "no table value" is the key not
+		// being sent at all, which also turns a required table field into a
+		// clean "<label> is required" instead of a shape error.
+		//
+		// This matters most in bulk mode, where a CSV with a sparse table column
+		// otherwise fails every row that leaves the cell blank.
+		if f.FieldType == "table" {
+			return kickoffOmitted{}, nil
+		}
 		return "", nil
 	}
 	switch f.FieldType {
@@ -254,13 +288,19 @@ func encodeKickoffValue(f tallyfy.KickoffField, raw string, members map[string]j
 
 // encodeKickoffFile builds the list-of-objects shape a file field requires.
 //
-// This is not cosmetic. Nothing validates a file value on the way in -
-// FormValuesValidator has no `file` arm at all - so a wrong shape is not
-// rejected with a clean 422, it reaches storage and throws. Task::
+// This is not cosmetic. When this was written nothing validated a file value on
+// the way in - FormValuesValidator had no `file` arm at all - so a wrong shape
+// was not rejected with a clean 422, it reached storage and threw. Task::
 // updateCaptureValues does `foreach ($payload as $item)` over the value, so
-// the URL a user naturally types is a hard 500 ("foreach() argument must be
+// the URL a user naturally types was a hard 500 ("foreach() argument must be
 // of type array|object, string given"), and RunsRepository::captureRunValue
 // foreachs the same value again on the prerun path.
+//
+// api-v2 added the missing arm on 2026-07-23 (FormValuesValidator.php:124-158,
+// commit ad5787b92), so a bare string is now a clean 422 instead. That does not
+// make this encoder optional - it is what turns a 422 into a working launch -
+// and the arm additionally requires `source` to be one of ASSET_SOURCES
+// ('local', 'url'), which the object below already satisfies.
 //
 // The object mirrors the two shipped connectors (middleware processFieldValue,
 // migrator prerun_encoder) and api-v2's own Swagger for form_value:

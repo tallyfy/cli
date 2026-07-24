@@ -96,7 +96,9 @@ func (a *mockAPI) handle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, `{"data":{"id":"bp_1","title":"Onboarding","status":"published","prerun":[`+
 			`{"id":"tl_dept","alias":"dept-1","label":"Department","field_type":"text","options":[]},`+
 			`{"id":"tl_prio","alias":"priority-1","label":"Priority","field_type":"dropdown","options":[{"id":1,"text":"High","value":null},{"id":2,"text":"Normal","value":null}]},`+
-			`{"id":"tl_doc","alias":"contract-1","label":"Contract","field_type":"file","options":[]}`+
+			`{"id":"tl_doc","alias":"contract-1","label":"Contract","field_type":"file","options":[]},`+
+			`{"id":"tl_kit","alias":"kit-1","label":"Kit","field_type":"table","options":[],`+
+			`"columns":[{"id":1,"label":"Item"},{"id":2,"label":"Qty"}]}`+
 			`]}}`)
 	case r.Method == "POST" && path == "/organizations/org_test/checklists":
 		// The real API requires a "type" field on create; mirror that so the
@@ -389,6 +391,48 @@ func TestLaunchFileFieldSendsObjectList(t *testing.T) {
 	want := `"tl_doc":[{"filename":"signed.pdf","source":"url","url":"https://cdn.example.com/docs/signed.pdf?sig=abc"}]`
 	if !strings.Contains(body, want) {
 		t.Errorf("body missing %s:\n%s", want, body)
+	}
+}
+
+// A CSV where the table column is sparse must still launch every row. A blank
+// cell used to go out as "", and FormValuesValidator's table arm - the only one
+// with no empty($values) early-break - answers 422 "Invalid table field", so a
+// whole bulk run failed on rows that simply left an optional table blank.
+func TestBulkLaunchOmitsBlankTableCells(t *testing.T) {
+	api, srv := newMockAPI()
+	defer srv.Close()
+
+	csv := "name,Department,Kit\n" +
+		"Onboard ACME,Sales,\"[{\"\"Item\"\":\"\"Laptop\"\"},{\"\"Qty\"\":\"\"1\"\"}]\"\n" +
+		"Onboard Beta,Ops,\n"
+	path := filepath.Join(t.TempDir(), "rows.csv")
+	if err := os.WriteFile(path, []byte(csv), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	res := run(t, srv.URL, "",
+		"--settings", `{"permissions":{"allow":["Process(launch)"]}}`,
+		"process", "launch", "--blueprint", "bp_1", "--from-csv", path)
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s\nstdout=%s", res.code, res.stderr, res.stdout)
+	}
+
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if len(api.runBodies) != 2 {
+		t.Fatalf("launched %d processes, want 2", len(api.runBodies))
+	}
+	// Row 1 supplied a real table value: it must survive untouched.
+	if !strings.Contains(api.runBodies[0], `"tl_kit":[{"Item":"Laptop"},{"Qty":"1"}]`) {
+		t.Errorf("row 1 lost its table value:\n%s", api.runBodies[0])
+	}
+	// Row 2 left it blank: the key must be absent, NOT sent as "".
+	if strings.Contains(api.runBodies[1], `"tl_kit"`) {
+		t.Errorf("row 2 still sends the blank table field; api-v2 answers 422 Invalid table field:\n%s", api.runBodies[1])
+	}
+	// ...and the rest of row 2 must still be there.
+	if !strings.Contains(api.runBodies[1], `"tl_dept":"Ops"`) {
+		t.Errorf("row 2 lost its other kick-off values:\n%s", api.runBodies[1])
 	}
 }
 
