@@ -201,8 +201,9 @@ func TestEncodeKickoffValue(t *testing.T) {
 			field: "STF KO", raw: "hello", want: "hello",
 		},
 		{
-			// api-v2 accepts an empty value for every type, and a required
-			// field still fails its own required check.
+			// api-v2 accepts an empty value for every type EXCEPT table, and a
+			// required field still fails its own required check. The table
+			// exception is pinned by TestEncodeKickoffBlankTableIsOmitted.
 			name:  "empty value stays an empty scalar",
 			field: "DD KO", raw: "", want: "",
 		},
@@ -380,8 +381,10 @@ func TestEncodeKickoffFile(t *testing.T) {
 			want: `[{"filename":"a.pdf","full_url":"https://api.example.com/uploads/a.pdf"}]`,
 		},
 		{
-			// Matches every other type: an empty cell clears the field, and a
-			// required field still fails its own required check server-side.
+			// The file arm of FormValuesValidator breaks on empty($values), so
+			// an empty cell clears the field and a required field still fails
+			// its own required check server-side. (table is the one type where
+			// this is NOT true - see TestEncodeKickoffBlankTableIsOmitted.)
 			name: "an empty value stays an empty scalar",
 			raw:  "",
 			want: `""`,
@@ -554,6 +557,100 @@ func TestEncodePrerunKeysByTimelineID(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("prerun = %#v, want %#v", got, want)
+	}
+}
+
+// A blank cell against a table field must be OMITTED from prerun, not sent as
+// "". FormValuesValidator's table arm is the only one without an
+// empty($values) early-break, so `! is_array("")` is true and api-v2 answers
+// 422 "Invalid table field". An empty list is no better: it fails the
+// count($values) !== count($capture->columns) check instead.
+func TestEncodeKickoffBlankTableIsOmitted(t *testing.T) {
+	var table tallyfy.KickoffField
+	for _, f := range kickoffFixture() {
+		if f.FieldType == "table" {
+			table = f
+		}
+	}
+	if table.ID == "" {
+		t.Fatal("fixture has no table field")
+	}
+	if len(table.Columns) == 0 {
+		t.Fatal("the fixture's table field needs columns, or api-v2 skips the check this pins")
+	}
+
+	for _, raw := range []string{"", "   ", "\t"} {
+		got, err := encodeKickoffValue(table, raw, nil)
+		if err != nil {
+			t.Fatalf("encodeKickoffValue(%q) error: %v", raw, err)
+		}
+		if _, ok := got.(kickoffOmitted); !ok {
+			t.Errorf("encodeKickoffValue(%q) = %#v, want kickoffOmitted so the key is dropped", raw, got)
+		}
+	}
+}
+
+// The omission has to survive to the payload, and it must not take other
+// fields on the same row with it.
+func TestEncodePrerunDropsBlankTableKeepsOthers(t *testing.T) {
+	fields := kickoffFixture()
+	resolved, err := resolveKickoffKeys(fields, "bp-123", []string{"TABLE KO", "STF KO"})
+	if err != nil {
+		t.Fatalf("resolveKickoffKeys error: %v", err)
+	}
+	got, err := encodePrerun(resolved, map[string]string{"TABLE KO": "", "STF KO": "hello"}, nil)
+	if err != nil {
+		t.Fatalf("encodePrerun error: %v", err)
+	}
+	want := map[string]any{"bbd6a81fbb1da0b90610bf9560da339d": "hello"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("prerun = %#v, want %#v (blank table key dropped, text key kept)", got, want)
+	}
+	if _, present := got["2d16159369e95b1740e24b8d9aaff44b"]; present {
+		t.Error("blank table field is still in the payload; api-v2 answers 422 Invalid table field")
+	}
+}
+
+// A row whose only supplied field is a blank table cell must send no prerun at
+// all, rather than an empty object.
+func TestEncodePrerunAllOmittedIsNil(t *testing.T) {
+	fields := kickoffFixture()
+	resolved, err := resolveKickoffKeys(fields, "bp-123", []string{"TABLE KO"})
+	if err != nil {
+		t.Fatalf("resolveKickoffKeys error: %v", err)
+	}
+	got, err := encodePrerun(resolved, map[string]string{"TABLE KO": ""}, nil)
+	if err != nil {
+		t.Fatalf("encodePrerun error: %v", err)
+	}
+	if got != nil {
+		t.Errorf("prerun = %#v, want nil so the body omits it entirely", got)
+	}
+}
+
+// A non-blank table value must still be encoded and validated as before - the
+// blank short-circuit must not have widened into a general table bypass.
+func TestEncodePrerunKeepsNonBlankTable(t *testing.T) {
+	fields := kickoffFixture()
+	resolved, err := resolveKickoffKeys(fields, "bp-123", []string{"TABLE KO"})
+	if err != nil {
+		t.Fatalf("resolveKickoffKeys error: %v", err)
+	}
+	got, err := encodePrerun(resolved, map[string]string{"TABLE KO": `[{"T1":"a"},{"T2":"b"}]`}, nil)
+	if err != nil {
+		t.Fatalf("encodePrerun error: %v", err)
+	}
+	want := map[string]any{
+		"2d16159369e95b1740e24b8d9aaff44b": []any{
+			map[string]any{"T1": "a"},
+			map[string]any{"T2": "b"},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("prerun = %#v, want %#v", got, want)
+	}
+	if _, err := encodePrerun(resolved, map[string]string{"TABLE KO": `[{"T1":"a"}]`}, nil); err == nil {
+		t.Error("a table value with the wrong column count must still be rejected client-side")
 	}
 }
 
