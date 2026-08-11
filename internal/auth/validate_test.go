@@ -48,7 +48,7 @@ func TestValidateToken(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"data": map[string]any{
 				"id":         12345,
-				"email":      "amit@tallyfy.com",
+				"email":      "user@example.com",
 				"username":   "amit",
 				"first_name": "Amit",
 				"last_name":  "Kothari",
@@ -65,8 +65,8 @@ func TestValidateToken(t *testing.T) {
 	if me == nil {
 		t.Fatal("ValidateToken() returned nil Me")
 	}
-	if me.Email != "amit@tallyfy.com" {
-		t.Errorf("me.Email = %q, want %q", me.Email, "amit@tallyfy.com")
+	if me.Email != "user@example.com" {
+		t.Errorf("me.Email = %q, want %q", me.Email, "user@example.com")
 	}
 	if gotAuth != "Bearer test-token-abc" {
 		t.Errorf("Authorization header = %q, want %q", gotAuth, "Bearer test-token-abc")
