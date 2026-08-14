@@ -450,18 +450,61 @@ func kickoffOptionValue(o tallyfy.KickoffOption, selected bool) map[string]any {
 	return v
 }
 
-// matchKickoffOption finds the option whose text is what the user typed.
-// Exact wins; a case-insensitive match is accepted as a convenience, and the
-// option's own text is always what gets sent.
+// kickoffOptionID renders one option's id as the plain string a user would
+// type. The id is held as raw JSON so that whatever the API sent is echoed back
+// verbatim (see KickoffOption), which means a numeric id arrives as the bytes
+// `2` and a string id as the bytes `"2"` - quotes included. Only the second
+// needs unwrapping. An absent or null id renders empty, and matchKickoffOption
+// never compares against an empty id, so a field whose options carry no ids
+// cannot be selected by a blank value.
+func kickoffOptionID(o tallyfy.KickoffOption) string {
+	s := strings.TrimSpace(string(o.ID))
+	if s == "" || s == "null" {
+		return ""
+	}
+	if strings.HasPrefix(s, `"`) {
+		var unquoted string
+		if err := json.Unmarshal([]byte(s), &unquoted); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(unquoted)
+	}
+	return s
+}
+
+// matchKickoffOption finds the option the user named, by its text or by its id.
+//
+// Three passes, in this order: exact text, case-insensitive text, then id. The
+// id pass runs last on purpose. Where one option's id happens to equal a
+// DIFFERENT option's text the tools disagree about what should win, so putting
+// both text passes first means an unambiguous text match always decides and the
+// collision is never reached. That sidesteps the disagreement rather than
+// settling it (tracked as a cross-tool question in tallyfy/middleware).
+//
+// Both sides of every text comparison are trimmed, matching what the five
+// connectors do (String(a).trim().toLowerCase() === String(b).trim().toLowerCase()).
+// Trimming only the user's input, as this did until 2026-08-13, made an option
+// whose stored text carries surrounding whitespace - which the web UI happily
+// saves - impossible to select by any value at all.
+//
+// The trim is for COMPARISON ONLY. The option is returned untouched, so
+// kickoffOptionValue still sends the option's own text exactly as the blueprint
+// stores it, whitespace and all, which is what FormValuesValidator checks
+// against. The caller's raw input is never what goes on the wire.
 func matchKickoffOption(f tallyfy.KickoffField, raw string) (tallyfy.KickoffOption, error) {
 	raw = strings.TrimSpace(raw)
 	for _, o := range f.Options {
-		if o.Text == raw {
+		if strings.TrimSpace(o.Text) == raw {
 			return o, nil
 		}
 	}
 	for _, o := range f.Options {
-		if strings.EqualFold(o.Text, raw) {
+		if strings.EqualFold(strings.TrimSpace(o.Text), raw) {
+			return o, nil
+		}
+	}
+	for _, o := range f.Options {
+		if id := kickoffOptionID(o); id != "" && id == raw {
 			return o, nil
 		}
 	}
