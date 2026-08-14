@@ -541,6 +541,173 @@ func TestEncodeKickoffOptionIDStaysNumeric(t *testing.T) {
 	}
 }
 
+// matchOptionFixture is a dropdown built to exercise every arm of
+// matchKickoffOption at once, so one field serves the whole table.
+//
+// The two collisions are deliberately built on UNPADDED options, so that a
+// case failing tells you which arm broke rather than implicating two at once:
+//
+//   - " Gold " is the only padded option, exactly as a blueprint edited in the
+//     web UI can store it. Nothing about it is reachable unless BOTH sides of
+//     the comparison are trimmed, and no other case depends on trimming.
+//   - "Copper" carries the string id "silver", which collides with the text of
+//     "Silver". Selecting "silver" must return "Silver", proving the id pass
+//     runs after the case-insensitive text pass. It also exercises a quoted id.
+//   - "Bronze" carries the numeric id 2, which collides with the text of the
+//     last option, "2". Selecting "2" must return the option whose TEXT is "2",
+//     proving the id pass also runs after the exact text pass.
+func matchOptionFixture() tallyfy.KickoffField {
+	return tallyfy.KickoffField{
+		ID: "0f2a", Alias: "metal", Label: "METAL KO", FieldType: "dropdown",
+		Options: []tallyfy.KickoffOption{
+			{ID: json.RawMessage("1"), Text: " Gold "},
+			{ID: json.RawMessage(`"silver"`), Text: "Copper"},
+			{ID: json.RawMessage("7"), Text: "Silver"},
+			{ID: json.RawMessage("2"), Text: "Bronze"},
+			{ID: json.RawMessage("9"), Text: "2"},
+		},
+	}
+}
+
+// TestMatchKickoffOption is the whole contract of matchKickoffOption, asserted
+// on the RETURNED OPTION rather than on any error string, because the returned
+// option is what kickoffOptionValue puts on the wire.
+//
+// Each case names the arm it is testing, so reverting one arm reddens one case
+// and the attribution is unambiguous.
+func TestMatchKickoffOption(t *testing.T) {
+	f := matchOptionFixture()
+	tests := []struct {
+		name     string
+		raw      string
+		wantText string // the option's OWN text, never the caller's input
+		wantID   string // the option's id, as raw JSON
+	}{
+		{
+			// Arm: both-sides trim. Red if only the input is trimmed.
+			name: "an option whose stored text has surrounding whitespace is selectable",
+			raw:  "Gold", wantText: " Gold ", wantID: "1",
+		},
+		{
+			// Arm: both-sides trim, reached case-insensitively.
+			name: "a padded option matches case-insensitively too",
+			raw:  "  gOlD  ", wantText: " Gold ", wantID: "1",
+		},
+		{
+			// Arm: id pass, numeric id. Red only if there is no id arm.
+			name: "an option id selects that option",
+			raw:  "7", wantText: "Silver", wantID: "7",
+		},
+		{
+			// Ordering: exact text must beat an id match on a DIFFERENT option.
+			// "2" is the text of the id-9 option and the id of "Bronze".
+			name: "an exact text match beats an id collision",
+			raw:  "2", wantText: "2", wantID: "9",
+		},
+		{
+			// Ordering: the id pass runs after BOTH text passes, so even a
+			// case-insensitive text match outranks an id match elsewhere.
+			// "silver" is the id of "Copper" and folds to the text of "Silver".
+			// Neither option is padded, so this stays green without the trim.
+			name: "a case-insensitive text match beats an id collision",
+			raw:  "silver", wantText: "Silver", wantID: "7",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := matchKickoffOption(f, tc.raw)
+			if err != nil {
+				t.Fatalf("matchKickoffOption(%q) error: %v", tc.raw, err)
+			}
+			if got.Text != tc.wantText {
+				t.Errorf("matchKickoffOption(%q).Text = %q, want %q", tc.raw, got.Text, tc.wantText)
+			}
+			if string(got.ID) != tc.wantID {
+				t.Errorf("matchKickoffOption(%q).ID = %s, want %s", tc.raw, got.ID, tc.wantID)
+			}
+		})
+	}
+}
+
+// TestMatchKickoffOptionErrors pins that a value matching neither a text nor an
+// id still fails loud and names every valid choice. Unchanged by the trim and
+// id arms, and deliberately so: adding ways to match must not quietly widen
+// what is accepted past the option list.
+func TestMatchKickoffOptionErrors(t *testing.T) {
+	tests := []struct {
+		name     string
+		field    tallyfy.KickoffField
+		raw      string
+		wantText string
+	}{
+		{
+			name:  "a value matching no text and no id lists the choices",
+			field: matchOptionFixture(), raw: "Platinum",
+			wantText: `choose one of " Gold ", "Copper", "Silver", "Bronze", "2"`,
+		},
+		{
+			name:  "an id that belongs to no option is still rejected",
+			field: matchOptionFixture(), raw: "999",
+			wantText: `invalid value "999" for kick-off field "METAL KO"`,
+		},
+		{
+			name: "a blank value cannot select an option that has no id",
+			field: tallyfy.KickoffField{
+				ID: "0f2b", Label: "NO IDS", FieldType: "dropdown",
+				Options: []tallyfy.KickoffOption{{Text: "Alpha"}},
+			},
+			raw:      "",
+			wantText: `invalid value "" for kick-off field "NO IDS"`,
+		},
+		{
+			name: "a field with no options at all says so",
+			field: tallyfy.KickoffField{
+				ID: "0f2c", Label: "EMPTY KO", FieldType: "dropdown",
+			},
+			raw:      "anything",
+			wantText: `defines no options, so "anything" cannot be matched`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := matchKickoffOption(tc.field, tc.raw)
+			if msg := wantUsageError(t, err).Error(); !strings.Contains(msg, tc.wantText) {
+				t.Errorf("error message = %q, want it to contain %q", msg, tc.wantText)
+			}
+			if !reflect.DeepEqual(got, tallyfy.KickoffOption{}) {
+				t.Errorf("returned option = %#v, want the zero option on error", got)
+			}
+		})
+	}
+}
+
+// TestKickoffOptionID pins how a raw-JSON option id is rendered for comparison.
+// The empty results are the load-bearing ones: matchKickoffOption skips an
+// empty id, so anything that renders empty here can never be selected by a
+// blank value.
+func TestKickoffOptionID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   json.RawMessage
+		want string
+	}{
+		{name: "a numeric id is its digits", id: json.RawMessage("2"), want: "2"},
+		{name: "a string id loses its quotes", id: json.RawMessage(`"2"`), want: "2"},
+		{name: "a padded string id is trimmed", id: json.RawMessage(`" a7 "`), want: "a7"},
+		{name: "an absent id renders empty", id: nil, want: ""},
+		{name: "an empty id renders empty", id: json.RawMessage(""), want: ""},
+		{name: "a null id renders empty", id: json.RawMessage("null"), want: ""},
+		{name: "an unreadable string id renders empty", id: json.RawMessage(`"oops`), want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := kickoffOptionID(tallyfy.KickoffOption{ID: tc.id}); got != tc.want {
+				t.Errorf("kickoffOptionID(%s) = %q, want %q", tc.id, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEncodePrerunKeysByTimelineID(t *testing.T) {
 	fields := kickoffFixture()
 	resolved, err := resolveKickoffKeys(fields, "bp-123", []string{"STF KO", "dd-ko-8308340"})
