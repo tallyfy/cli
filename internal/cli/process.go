@@ -372,6 +372,14 @@ func processLaunchBulk(cmd *cobra.Command, ctx *Context, org, blueprintID, csvPa
 		return err
 	}
 
+	// Same guarantee as the header check just above, extended to values: a
+	// cap violation anywhere in the file aborts the whole launch before any
+	// row's process exists, rather than surfacing only when the loop below
+	// reaches that row - by which point earlier rows have already launched.
+	if err := checkKickoffLengthsBulk(header, dataRows, nameIdx, resolved); err != nil {
+		return err
+	}
+
 	if err := ctx.Guard("Process", "launch", hooks.PreLaunch, hooks.Payload{Resource: "process", ID: blueprintID}); err != nil {
 		return err
 	}
@@ -426,6 +434,39 @@ func processLaunchBulk(cmd *cobra.Command, ctx *Context, org, blueprintID, csvPa
 	}
 	if failed > 0 {
 		return &BulkPartialError{Succeeded: succeeded, Failed: failed, Total: len(dataRows)}
+	}
+	return nil
+}
+
+// checkKickoffLengthsBulk validates every row's text/textarea values against
+// the length caps up front, before processLaunchBulk's row loop launches
+// anything - the same fail-before-any-process guarantee resolveKickoffKeys
+// already gives the unknown-header check just above it.
+//
+// This is deliberately narrower than re-running full encoding for every row:
+// the per-row loop still evaluates every OTHER encoding error (an unmatched
+// dropdown option, a malformed table cell, ...) lazily, one row at a time,
+// and reports it as a partial failure via BulkPartialError - that existing
+// behaviour is unchanged. Only the length caps get the stronger up-front
+// guarantee, because unlike those, a length violation is knowable straight
+// from the raw CSV cell, with no field-type-specific encoding required, so
+// checking it early costs nothing and duplicates no encoding logic.
+func checkKickoffLengthsBulk(header []string, dataRows [][]string, nameIdx int, resolved map[string]tallyfy.KickoffField) error {
+	for i, rec := range dataRows {
+		_, fields := csvRowFields(header, rec, nameIdx)
+		for _, key := range sortedKeys(fields) { // deterministic: same bad row reported every run
+			raw := fields[key]
+			if strings.TrimSpace(raw) == "" {
+				continue // blank cells clear the field; encodeKickoffValue never length-checks them either
+			}
+			f, ok := resolved[key]
+			if !ok {
+				return &UsageError{Msg: fmt.Sprintf("kick-off field %q was never resolved to a field ID", key)}
+			}
+			if err := checkKickoffLength(f, raw); err != nil {
+				return &UsageError{Msg: fmt.Sprintf("row %d: %s", i+2, err.Error())} // +2: 1-based, header row counted
+			}
+		}
 	}
 	return nil
 }

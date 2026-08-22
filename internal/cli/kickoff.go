@@ -205,6 +205,63 @@ func encodePrerun(resolved map[string]tallyfy.KickoffField, values map[string]st
 // encodePrerun drops these; nothing else ever sees one.
 type kickoffOmitted struct{}
 
+// Kick-off text/textarea length caps, the ONE place these two numbers are
+// spelled out. They mirror api-v2's FORM_TEXT_LENGTH and FORM_TEXTAREA_LENGTH
+// (api-v2 app/Helpers/constants.php:102-103, values 200 and 30000).
+//
+// The unit is BYTES, not runes, and that was verified rather than assumed:
+// FormValuesValidator enforces both caps with PHP's raw strlen() -
+// app/Http/Requests/Captures/FormValuesValidator.php:59-62 (text) and :75-78
+// (textarea) - not a wrapped Laravel `max:`/`mb_strlen` rule, so there is no
+// mbstring involvement to make it multi-byte-aware. strlen() has counted
+// bytes unconditionally since PHP 8.0 removed mbstring.func_overload, the
+// only setting that ever changed that, and api-v2 requires PHP ^8.4
+// (composer.json), so this is not environment-dependent.
+//
+// Matching it with len() below rather than utf8.RuneCountInString() is the
+// choice that cannot reject a value api-v2 would accept: counting runes
+// would let a multi-byte value (e.g. 200 three-byte characters, 600 bytes)
+// pass here and then 422 from the server - the exact round trip this issue
+// exists to remove, worse in bulk mode where earlier rows already launched.
+// Counting bytes instead means the CLI's decision matches the server's
+// exactly, in both directions.
+const (
+	kickoffTextMaxBytes     = 200
+	kickoffTextareaMaxBytes = 30000
+)
+
+// kickoffLengthCap returns the byte cap for a field type and whether that
+// type is capped at all. Only text and textarea are capped, matching
+// FormValuesValidator - every other type either has no free-text shape or is
+// already shape-checked elsewhere in this file.
+func kickoffLengthCap(fieldType string) (limit int, capped bool) {
+	switch fieldType {
+	case "text":
+		return kickoffTextMaxBytes, true
+	case "textarea":
+		return kickoffTextareaMaxBytes, true
+	}
+	return 0, false
+}
+
+// checkKickoffLength rejects a text/textarea value api-v2 would 422. raw is
+// checked un-trimmed and as the caller received it: that is exactly what the
+// text/textarea case below sends on the wire, since neither type transforms
+// its value. (An all-whitespace raw never reaches this - the blank-value
+// short-circuit above turns it into "" before the switch runs.)
+func checkKickoffLength(f tallyfy.KickoffField, raw string) error {
+	limit, capped := kickoffLengthCap(f.FieldType)
+	if !capped {
+		return nil
+	}
+	if n := len(raw); n > limit {
+		return &UsageError{Msg: fmt.Sprintf(
+			"kick-off field %q (%s) is %d bytes over the %d-byte limit (got %d bytes)",
+			kickoffFieldName(f), f.FieldType, n-limit, limit, n)}
+	}
+	return nil
+}
+
 // encodeKickoffValue converts a raw CLI/CSV string into the JSON value shape
 // FormValuesValidator requires for the field's type. members maps a lowercased
 // email to that member's id and is consulted only for assignees_form fields.
@@ -270,6 +327,15 @@ func encodeKickoffValue(f tallyfy.KickoffField, raw string, members map[string]j
 		}
 		return opt.Text, nil
 
+	case "text", "textarea":
+		// The only two types with a length cap. Checked here rather than in a
+		// shared pre-pass so a single-launch (not just bulk) also rejects an
+		// over-length value before Guard ever fires - see kickoffLengthCap.
+		if err := checkKickoffLength(f, raw); err != nil {
+			return nil, err
+		}
+		return raw, nil
+
 	case "table":
 		return encodeKickoffTable(f, raw)
 
@@ -279,10 +345,11 @@ func encodeKickoffValue(f tallyfy.KickoffField, raw string, members map[string]j
 	case "assignees_form":
 		return encodeKickoffAssignees(f, raw, members)
 	}
-	// text, textarea, email, date and any type added later go through as the
-	// scalar the user typed. api-v2's full set is text, textarea, radio,
+	// email, date and any type added later go through as the scalar the user
+	// typed, with no length cap. api-v2's full set is text, textarea, radio,
 	// dropdown, multiselect, date, email, file, table, assignees_form
-	// (BaseCapture::$field_types), so every non-scalar type is handled above.
+	// (BaseCapture::$field_types); text and textarea are capped above, and
+	// every other non-scalar type is handled above too.
 	return raw, nil
 }
 
