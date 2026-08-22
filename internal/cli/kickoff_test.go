@@ -276,6 +276,137 @@ func TestEncodeKickoffValue(t *testing.T) {
 	}
 }
 
+// TestEncodeKickoffValueLengthCap pins the text/textarea length caps
+// (kickoffTextMaxBytes=200, kickoffTextareaMaxBytes=30000), measured in
+// BYTES to match api-v2's FormValuesValidator, which enforces both with raw
+// PHP strlen() rather than a multi-byte-aware rule (see the comment on
+// kickoffLengthCap in kickoff.go for how that was established).
+func TestEncodeKickoffValueLengthCap(t *testing.T) {
+	byLabel := map[string]tallyfy.KickoffField{}
+	for _, f := range kickoffFixture() {
+		byLabel[f.Label] = f
+	}
+
+	tests := []struct {
+		name     string
+		field    string
+		raw      string
+		wantErr  bool
+		wantText []string // substrings the error must contain: field, cap, actual length
+	}{
+		{
+			name:  "text exactly at the 200-byte cap is accepted",
+			field: "STF KO", raw: strings.Repeat("a", 200),
+		},
+		{
+			name:  "text one byte over the cap is rejected",
+			field: "STF KO", raw: strings.Repeat("a", 201), wantErr: true,
+			wantText: []string{`"STF KO"`, "200-byte limit", "by 1", "201 bytes total"},
+		},
+		{
+			name:  "textarea exactly at the 30000-byte cap is accepted",
+			field: "LTF KO", raw: strings.Repeat("a", 30000),
+		},
+		{
+			name:  "textarea one byte over the cap is rejected",
+			field: "LTF KO", raw: strings.Repeat("a", 30001), wantErr: true,
+			wantText: []string{`"LTF KO"`, "30000-byte limit", "by 1", "30001 bytes total"},
+		},
+		{
+			// "e" with an acute accent is 2 bytes in UTF-8 (U+00E9), so 100 of
+			// them is 100 runes but exactly 200 bytes: at the byte cap, and
+			// far under a 200-rune cap. Proves the boundary is measured in
+			// bytes, not runes - if this test used a 200-RUNE reading of the
+			// same cap it would also pass, so it alone would not catch a
+			// regression to utf8.RuneCountInString. The next case does.
+			name:  "a multi-byte value exactly at the 200-byte cap (100 two-byte runes) is accepted",
+			field: "STF KO", raw: strings.Repeat("é", 100),
+		},
+		{
+			// 200 runes of the same 2-byte character is 400 bytes: exactly at
+			// a 200-RUNE cap, but 200 bytes over the real 200-BYTE one. If the
+			// implementation ever regressed to utf8.RuneCountInString, this
+			// value would be wrongly ACCEPTED - which is the direction the
+			// issue explicitly bans ("never reject a value the server would
+			// accept" implies the converse must hold too: never accept
+			// locally what the server would 422).
+			name:  "a multi-byte value at an at-cap RUNE count but over-cap BYTE count is rejected",
+			field: "STF KO", raw: strings.Repeat("é", 200), wantErr: true,
+			wantText: []string{`"STF KO"`, "200-byte limit", "by 200", "400 bytes total"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := encodeKickoffValue(byLabel[tc.field], tc.raw, nil)
+			if tc.wantErr {
+				msg := wantUsageError(t, err).Error()
+				for _, want := range tc.wantText {
+					if !strings.Contains(msg, want) {
+						t.Errorf("error message %q is missing %q", msg, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("encodeKickoffValue(%d bytes) error: %v", len(tc.raw), err)
+			}
+			if got != any(tc.raw) {
+				t.Errorf("encoded = %#v, want the scalar unchanged", got)
+			}
+		})
+	}
+}
+
+// TestCheckKickoffLengthsBulk pins the bulk-mode guarantee from AC3: a length
+// violation anywhere in the CSV is caught before processLaunchBulk's row loop
+// would launch a single process, exactly like resolveKickoffKeys already does
+// for an unknown header.
+func TestCheckKickoffLengthsBulk(t *testing.T) {
+	header := []string{"name", "STF KO"}
+	resolved, err := resolveKickoffKeys(kickoffFixture(), "bp-123", csvFieldHeaders(header, 0))
+	if err != nil {
+		t.Fatalf("resolveKickoffKeys error: %v", err)
+	}
+
+	t.Run("every row within the cap passes", func(t *testing.T) {
+		dataRows := [][]string{
+			{"Row A", "fine"},
+			{"Row B", strings.Repeat("a", 200)},
+			{"Row C", ""},
+		}
+		if err := checkKickoffLengthsBulk(header, dataRows, 0, resolved); err != nil {
+			t.Errorf("checkKickoffLengthsBulk error: %v", err)
+		}
+	})
+
+	t.Run("a violation in a LATER row is still caught before any row would launch", func(t *testing.T) {
+		// Row indices 0,1,2 map to CSV row numbers 2,3,4 (header is row 1) -
+		// processLaunchBulk's own 1-based, header-inclusive numbering.
+		dataRows := [][]string{
+			{"Row A", "fine"},
+			{"Row B", "also fine"},
+			{"Row C", strings.Repeat("a", 201)},
+		}
+		err := checkKickoffLengthsBulk(header, dataRows, 0, resolved)
+		msg := wantUsageError(t, err).Error()
+		if !strings.Contains(msg, "row 4") {
+			t.Errorf("error message = %q, want it to name row 4 (1-based, header counted)", msg)
+		}
+	})
+
+	t.Run("an over-cap value in the FIRST row is caught too", func(t *testing.T) {
+		dataRows := [][]string{
+			{"Row A", strings.Repeat("a", 201)},
+			{"Row B", "fine"},
+		}
+		err := checkKickoffLengthsBulk(header, dataRows, 0, resolved)
+		msg := wantUsageError(t, err).Error()
+		if !strings.Contains(msg, "row 2") {
+			t.Errorf("error message = %q, want it to name row 2", msg)
+		}
+	})
+}
+
 func TestEncodeKickoffValueErrors(t *testing.T) {
 	byLabel := map[string]tallyfy.KickoffField{}
 	for _, f := range kickoffFixture() {
