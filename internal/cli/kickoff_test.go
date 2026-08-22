@@ -288,10 +288,11 @@ func TestEncodeKickoffValueLengthCap(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		field   string
-		raw     string
-		wantErr bool
+		name     string
+		field    string
+		raw      string
+		wantErr  bool
+		wantText []string // substrings the error must contain: field, cap, actual length
 	}{
 		{
 			name:  "text exactly at the 200-byte cap is accepted",
@@ -300,6 +301,7 @@ func TestEncodeKickoffValueLengthCap(t *testing.T) {
 		{
 			name:  "text one byte over the cap is rejected",
 			field: "STF KO", raw: strings.Repeat("a", 201), wantErr: true,
+			wantText: []string{`"STF KO"`, "200-byte limit", "by 1", "201 bytes total"},
 		},
 		{
 			name:  "textarea exactly at the 30000-byte cap is accepted",
@@ -308,6 +310,7 @@ func TestEncodeKickoffValueLengthCap(t *testing.T) {
 		{
 			name:  "textarea one byte over the cap is rejected",
 			field: "LTF KO", raw: strings.Repeat("a", 30001), wantErr: true,
+			wantText: []string{`"LTF KO"`, "30000-byte limit", "by 1", "30001 bytes total"},
 		},
 		{
 			// "e" with an acute accent is 2 bytes in UTF-8 (U+00E9), so 100 of
@@ -329,6 +332,7 @@ func TestEncodeKickoffValueLengthCap(t *testing.T) {
 			// locally what the server would 422).
 			name:  "a multi-byte value at an at-cap RUNE count but over-cap BYTE count is rejected",
 			field: "STF KO", raw: strings.Repeat("é", 200), wantErr: true,
+			wantText: []string{`"STF KO"`, "200-byte limit", "by 200", "400 bytes total"},
 		},
 	}
 	for _, tc := range tests {
@@ -336,7 +340,7 @@ func TestEncodeKickoffValueLengthCap(t *testing.T) {
 			got, err := encodeKickoffValue(byLabel[tc.field], tc.raw, nil)
 			if tc.wantErr {
 				msg := wantUsageError(t, err).Error()
-				for _, want := range []string{kickoffFieldName(byLabel[tc.field]), "byte"} {
+				for _, want := range tc.wantText {
 					if !strings.Contains(msg, want) {
 						t.Errorf("error message %q is missing %q", msg, want)
 					}

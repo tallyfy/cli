@@ -256,8 +256,8 @@ func checkKickoffLength(f tallyfy.KickoffField, raw string) error {
 	}
 	if n := len(raw); n > limit {
 		return &UsageError{Msg: fmt.Sprintf(
-			"kick-off field %q (%s) is %d bytes over the %d-byte limit (got %d bytes)",
-			kickoffFieldName(f), f.FieldType, n-limit, limit, n)}
+			"kick-off field %q (%s) exceeds the %d-byte limit by %d (%d bytes total)",
+			kickoffFieldName(f), f.FieldType, limit, n-limit, n)}
 	}
 	return nil
 }
