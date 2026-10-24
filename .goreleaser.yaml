@@ -126,11 +126,14 @@ homebrew_casks:
       name: tallyfy-bot
       email: bot@tallyfy.com
     commit_msg_template: "chore: update {{ .ProjectName }} cask to {{ .Tag }}"
+    # install_steps replaces the deprecated install hook (goreleaser v2.19,
+    # after Homebrew retired postflight for postflight_steps). It is the
+    # snippet goreleaser documents for clearing the quarantine flag.
     hooks:
       post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/tallyfy"]
+        install_steps: |
+          on_macos do
+            run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ .StagedPath }}/tallyfy"]
           end
 
 # ---------------------------------------------------------------------------
