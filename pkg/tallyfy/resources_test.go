@@ -183,6 +183,42 @@ func TestResourceMethods(t *testing.T) {
 			wantMethod: "GET", wantPath: "/organizations/org1/checklists/b1/steps",
 		},
 		{
+			name: "CreateBlueprintStep", resp: itemResp(`{"id":"s9","title":"X"}`),
+			invoke: func(c *Client) error {
+				raw, err := c.CreateBlueprintStep(ctx, "org1", "b1", payload)
+				if err == nil && string(raw) != `{"id":"s9","title":"X"}` {
+					return fmt.Errorf("raw = %s", raw)
+				}
+				return err
+			},
+			wantMethod: "POST", wantPath: "/organizations/org1/checklists/b1/steps", wantBody: `{"title":"X"}`,
+		},
+		{
+			name: "UpdateBlueprintStep", resp: itemResp(`{"id":"s9"}`),
+			invoke: func(c *Client) error {
+				_, err := c.UpdateBlueprintStep(ctx, "org1", "b1", "s9", payload)
+				return err
+			},
+			wantMethod: "PUT", wantPath: "/organizations/org1/checklists/b1/steps/s9", wantBody: `{"title":"X"}`,
+		},
+		{
+			name: "CreateBlueprintMilestone", resp: itemResp(`{"id":"6243","title":"M","position":1}`),
+			invoke: func(c *Client) error {
+				_, err := c.CreateBlueprintMilestone(ctx, "org1", "b1", "M", 1)
+				return err
+			},
+			wantMethod: "POST", wantPath: "/organizations/org1/stages",
+			wantBody: `{"title":"M","subject_id":"b1","subject_type":"Checklist","position":1}`,
+		},
+		{
+			name: "LinkStepMilestone sends the id as a number", resp: itemResp(`{"id":"s9","stage_id":6243}`),
+			invoke: func(c *Client) error {
+				_, err := c.LinkStepMilestone(ctx, "org1", "b1", "s9", json.Number("6243"))
+				return err
+			},
+			wantMethod: "PUT", wantPath: "/organizations/org1/checklists/b1/steps/s9/link-stage", wantBody: `{"stage_id":6243}`,
+		},
+		{
 			// "id" is the field's timeline_id, and option ids arrive as
 			// numbers - both are what the launch payload has to echo back.
 			name: "GetKickoffFields decodes the inline prerun array",
@@ -675,6 +711,33 @@ func TestListMethodsPassListOptions(t *testing.T) {
 	for k, v := range map[string]string{"page": "3", "per_page": "25", "with": "tasks", "status": "active"} {
 		if got := rec.query.Get(k); got != v {
 			t.Errorf("query %s = %q, want %q", k, got, v)
+		}
+	}
+}
+
+// TestGetBlueprintStepsFollowsEveryPage covers tallyfy/work-queue#4260: the
+// steps route pages at 10 by default, so one request lost every step after
+// the first page. Every page must be fetched and joined in order.
+func TestGetBlueprintStepsFollowsEveryPage(t *testing.T) {
+	var calls []string
+	c := newTestClient(t, -1, pagedHandler(t, 3, 4, &calls))
+	raw, err := c.GetBlueprintSteps(context.Background(), "org1", "b1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []int
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("steps are not one JSON array: %v (%s)", err, raw)
+	}
+	if fmt.Sprint(got) != fmt.Sprint([]int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}) {
+		t.Errorf("steps = %v, want all 12 across 3 pages, in order", got)
+	}
+	if len(calls) != 3 {
+		t.Errorf("requests = %d (%q), want 3", len(calls), calls)
+	}
+	for i, q := range calls {
+		if !containsParam(q, "page", fmt.Sprint(i+1)) || !containsParam(q, "per_page", "100") {
+			t.Errorf("request %d query %q, want page=%d and per_page=100", i+1, q, i+1)
 		}
 	}
 }
