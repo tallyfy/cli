@@ -728,3 +728,46 @@ func TestBlueprintImportWarnsAboutAutomations(t *testing.T) {
 		t.Errorf("a file with no automations should not warn:\n%s", plain.stderr)
 	}
 }
+
+// An export can list steps out of position order: on api-v2 production the
+// ?with=steps include that `blueprint export` uses has no fixed order
+// (api-v2#11323). The import must still create the steps by position, and
+// step 2's deadline must still point at the new step 1. Adapted from the
+// reviewer's probe on tallyfy/cli#20.
+func TestBlueprintImportOrdersStepsByPosition(t *testing.T) {
+	_, srv := newImportAPI(t)
+	orig := readFixture(t, "blueprint-export-milestone.json")
+	var obj map[string]any
+	if err := json.Unmarshal(orig, &obj); err != nil {
+		t.Fatal(err)
+	}
+	steps := obj["steps"].(map[string]any)["data"].([]any)
+	for i, j := 0, len(steps)-1; i < j; i, j = i+1, j-1 {
+		steps[i], steps[j] = steps[j], steps[i]
+	}
+	if first := steps[0].(map[string]any)["position"]; first != float64(3) {
+		t.Fatalf("the reversed file starts with position %v, want 3 (the test input is not out of order)", first)
+	}
+	dir := t.TempDir()
+	in := filepath.Join(dir, "reversed.json")
+	b, _ := json.Marshal(obj)
+	if err := os.WriteFile(in, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", in, "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	out := filepath.Join(dir, "out.json")
+	if r := run(t, srv.URL, "", "blueprint", "export", importedID(t, res.stdout), "--out", out); r.code != 0 {
+		t.Fatalf("export exit = %d; stderr=%s", r.code, r.stderr)
+	}
+	exported, _ := os.ReadFile(out)
+	got, want := normalizeExport(t, exported), normalizeExport(t, orig)
+	if len(want) != 3 {
+		t.Fatalf("fixture has %d steps, want 3", len(want))
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("a file listing steps out of order did not import in position order\n got: %+v\nwant: %+v", got, want)
+	}
+}
