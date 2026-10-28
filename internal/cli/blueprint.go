@@ -314,7 +314,7 @@ func blueprintExportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "export <id>",
 		Short: "Export a blueprint to JSON (git-committable)",
-		Long:  "Fetch a blueprint with its steps, milestones and automated actions and write the raw JSON to stdout, or to --out. This is the form consumed by `blueprint import`.",
+		Long:  "Fetch a blueprint with its steps, milestones and automated actions and write the raw JSON to stdout, or to --out, with \"exported_from_org\" added as the first key. This is the form consumed by `blueprint import`.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, org, err := blueprintContext(cmd)
@@ -332,7 +332,9 @@ func blueprintExportCmd() *cobra.Command {
 				return err
 			}
 			out, _ := cmd.Flags().GetString("out")
-			return l6WritePrettyJSON(raw, out)
+			// Record the source org, so an import can tell whether the step
+			// assignees belong to the org it imports into.
+			return l6WritePrettyJSON(withExportOrg(raw, org), out)
 		},
 	}
 	cmd.Flags().String("out", "", "write to this file instead of stdout")
@@ -357,7 +359,13 @@ order with its form fields,
 puts each step back under its milestone, and re-points any deadline that
 counts from another step at the new copy of that step. If a request fails
 part way, the error names the blueprint that was created so you can delete it.
-Automations are not re-created yet; the import warns when the file has any.`,
+Automations are not re-created yet; the import warns when the file has any.
+
+Step assignees (users and groups) are kept when the file was exported from
+the org you import into. Otherwise the import checks them against that org's
+members and groups first, leaves off any that are not in it, and prints one
+warning naming them, so a promotion into another org does not stop at the
+first assigned step.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, org, err := blueprintContext(cmd)
@@ -383,6 +391,9 @@ Automations are not re-created yet; the import warns when the file has any.`,
 				ctx.DryRunf("POST /organizations/%s/checklists (import from %s)", org, args[0])
 				ctx.DryRunf("then %d milestone(s) (POST /organizations/%s/stages) and %d step(s) in order (POST /organizations/%s/checklists/{new id}/steps)",
 					len(plan.milestones), org, len(plan.steps), org)
+				if plan.checksAssignees(org) {
+					ctx.DryRunf("first check step assignees against the members and groups of org %s (%s), and leave off any that are not in it", org, plan.sourceDescription())
+				}
 				if len(plan.stripped) == 0 {
 					ctx.Printf("stripped system fields: (none present)\n")
 				} else {

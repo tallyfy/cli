@@ -57,7 +57,8 @@ type importPlan struct {
 	stripped    []string
 	milestones  []importMilestone
 	steps       []importStep
-	automations int // automated actions in the file, which the import does not re-create
+	automations int    // automated actions in the file, which the import does not re-create
+	sourceOrg   string // the org the file was exported from; "" when the file does not say
 }
 
 // importIncompleteError reports an import that created the blueprint but
@@ -104,6 +105,10 @@ func parseImportPlan(data []byte) (*importPlan, error) {
 	}
 	if err := stripKickoffIDs(obj); err != nil {
 		return nil, err
+	}
+	if raw, ok := obj[exportOrgField]; ok {
+		_ = json.Unmarshal(raw, &plan.sourceOrg)
+		delete(obj, exportOrgField)
 	}
 	// The template create ignores automated_actions too. Re-creating them
 	// needs every step, form field and kick-off field id they name mapped to
@@ -311,6 +316,18 @@ type importResult struct {
 // count from another step are re-pointed at the new step, never left pointing
 // at the source template's step.
 func runBlueprintImport(cctx context.Context, ctx *Context, org string, plan *importPlan) (*importResult, error) {
+	// Done before anything is created, so a failed lookup leaves nothing behind.
+	if plan.checksAssignees(org) {
+		users, groups, err := targetMembers(cctx, ctx, org)
+		if err != nil {
+			return nil, fmt.Errorf("check which step assignees belong to org %s: %w", org, err)
+		}
+		if dropped := dropForeignAssignees(plan, users, groups); len(dropped) > 0 {
+			ctx.Infof("warning: %s, so the import leaves off %d assignee(s) that are not in org %s: %s\n",
+				plan.sourceDescription(), len(dropped), org, strings.Join(dropped, ", "))
+		}
+	}
+
 	payload, err := json.Marshal(plan.template)
 	if err != nil {
 		return nil, err
@@ -450,4 +467,132 @@ func isNumeric(s string) bool {
 		}
 	}
 	return true
+}
+
+// exportOrgField is the key `blueprint export` adds to record the org a file
+// came from, so an import can tell a same-org import from a cross-org one.
+const exportOrgField = "exported_from_org"
+
+// withExportOrg adds exportOrgField as the first key of an exported
+// blueprint, keeping the API's own key order for everything after it.
+func withExportOrg(raw json.RawMessage, org string) json.RawMessage {
+	t := bytes.TrimSpace(raw)
+	if len(t) < 2 || t[0] != '{' {
+		return raw
+	}
+	key, _ := json.Marshal(exportOrgField)
+	val, _ := json.Marshal(org)
+	rest := bytes.TrimSpace(t[1:])
+	var b bytes.Buffer
+	b.WriteByte('{')
+	b.Write(key)
+	b.WriteByte(':')
+	b.Write(val)
+	if len(rest) > 0 && rest[0] != '}' {
+		b.WriteByte(',')
+	}
+	b.Write(rest)
+	if !json.Valid(b.Bytes()) {
+		return raw
+	}
+	return b.Bytes()
+}
+
+// checksAssignees reports whether the import must check step assignees
+// against the target org. api-v2 refuses a step whose users or groups are
+// not in the org (CreateStepRequest: org_user, org_group), so an import into
+// another org would stop at the first assigned step. Into the same org the
+// assignees are kept as they are (owner decision, tallyfy/work-queue#4280).
+// A file that does not say where it came from is checked.
+func (p *importPlan) checksAssignees(org string) bool {
+	if p.sourceOrg != "" && p.sourceOrg == org {
+		return false
+	}
+	for _, s := range p.steps {
+		if len(stepIDs(s.body["assignees"])) > 0 || len(stepIDs(s.body["groups"])) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *importPlan) sourceDescription() string {
+	if p.sourceOrg == "" {
+		return "the file does not say which org it was exported from"
+	}
+	return "the file was exported from org " + p.sourceOrg
+}
+
+// stepIDs reads a step's assignees or groups: an array of user ids (numbers)
+// or group ids (strings), normalized to strings.
+func stepIDs(raw json.RawMessage) []string {
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(items))
+	for _, it := range items {
+		if k := idKey(it); k != "" {
+			ids = append(ids, k)
+		}
+	}
+	return ids
+}
+
+// targetMembers lists the target org's member user ids and group ids. The
+// members list and api-v2's org_user rule both read organizations_users rows
+// that were not removed, so a user on the list is one a step can be assigned.
+func targetMembers(cctx context.Context, ctx *Context, org string) (users, groups map[string]bool, err error) {
+	us, _, err := ctx.API.ListUsers(cctx, org, tallyfy.ListOptions{All: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	gs, _, err := ctx.API.ListGroups(cctx, org, tallyfy.ListOptions{All: true})
+	if err != nil {
+		return nil, nil, err
+	}
+	users = make(map[string]bool, len(us))
+	for _, u := range us {
+		users[u.ID.String()] = true
+	}
+	groups = make(map[string]bool, len(gs))
+	for _, g := range gs {
+		groups[g.ID] = true
+	}
+	return users, groups, nil
+}
+
+// dropForeignAssignees removes from every step the users and groups that are
+// not members of the target org, and names each one it removed.
+func dropForeignAssignees(plan *importPlan, users, groups map[string]bool) []string {
+	var dropped []string
+	for i := range plan.steps {
+		s := &plan.steps[i]
+		for _, f := range []struct {
+			key, kind string
+			members   map[string]bool
+		}{{"assignees", "user", users}, {"groups", "group", groups}} {
+			raw, ok := s.body[f.key]
+			if !ok {
+				continue
+			}
+			var items []json.RawMessage
+			if json.Unmarshal(raw, &items) != nil {
+				continue
+			}
+			kept := make([]json.RawMessage, 0, len(items))
+			for _, it := range items {
+				if id := idKey(it); id != "" && !f.members[id] {
+					dropped = append(dropped, fmt.Sprintf("%s %s on step %d (%q)", f.kind, id, i+1, s.title))
+					continue
+				}
+				kept = append(kept, it)
+			}
+			if len(kept) != len(items) {
+				b, _ := json.Marshal(kept)
+				s.body[f.key] = b
+			}
+		}
+	}
+	return dropped
 }

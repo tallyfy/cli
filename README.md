@@ -70,9 +70,10 @@ tallyfy task list --process run_456
 
 ## What the CLI is for
 
-- **Workflows as code.** Export a blueprint to JSON, commit it, review changes in a pull request, and promote the same definition from a sandbox org to production.
+- **Workflows as code.** Export a blueprint to JSON, commit it, review changes in a pull request, and promote the same definition from a sandbox org to production. The import brings the steps, milestones, form fields and kick-off fields across. A step assigned to someone, or to a group, that is not in the target org is imported without that assignee, and the import prints one warning naming each one it left off. Automations are not copied yet.
   ```sh
-  tallyfy blueprint export bp_123 > blueprints/onboarding.json
+  tallyfy blueprint export bp_123 --org org_sandbox > blueprints/onboarding.json
+  tallyfy blueprint import blueprints/onboarding.json --org org_prod --dry-run
   tallyfy blueprint import blueprints/onboarding.json --org org_prod
   ```
 - **Bulk operations.** Launch one process per CSV row, with a dry run first and a clean exit code when some rows fail.
@@ -83,7 +84,7 @@ tallyfy task list --process run_456
   ```sh
   tallyfy task wait --process "$RUN_ID" --task "VP sign-off" --timeout 2h || exit 1
   ```
-- **Multi-org management.** Run one script across every organization you belong to.
+- **Multi-org management.** Run one script across every organization you belong to. In each org, step assignees who are not members there are left off, with a warning.
   ```sh
   for org in $(tallyfy org list --json | jq -r '.[].id'); do
     tallyfy blueprint import standard-sop.json --org "$org"

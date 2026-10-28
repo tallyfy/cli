@@ -52,6 +52,12 @@ type importAPI struct {
 	posts         int
 	linkCalls     int
 	failStepTitle string
+
+	// The target org's member user ids and group ids, as the users and groups
+	// routes list them and as api-v2's org_user and org_group rules check them.
+	members       map[string]bool
+	groups        map[string]bool
+	memberLookups int
 }
 
 type fakeTemplate struct {
@@ -77,7 +83,7 @@ type fakeStage struct {
 
 func newImportAPI(t *testing.T) (*importAPI, *httptest.Server) {
 	t.Helper()
-	api := &importAPI{templates: map[string]*fakeTemplate{}, stepOwner: map[string]string{}}
+	api := &importAPI{templates: map[string]*fakeTemplate{}, stepOwner: map[string]string{}, members: map[string]bool{}, groups: map[string]bool{}}
 	if err := json.Unmarshal(readFixture(t, "blueprint-export-milestone.json"), &api.source); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +118,8 @@ func (a *importAPI) handle(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet && len(parts) == 2 && parts[0] == "checklists":
 		a.getTemplate(w, parts[1], with)
+	case r.Method == http.MethodGet && len(parts) == 1 && (parts[0] == "users" || parts[0] == "groups"):
+		a.listMembers(w, parts[0])
 	case r.Method == http.MethodPost && len(parts) == 1 && parts[0] == "checklists":
 		a.createTemplate(w, body)
 	case r.Method == http.MethodPost && len(parts) == 3 && parts[0] == "checklists" && parts[2] == "steps":
@@ -189,6 +197,13 @@ func (a *importAPI) renderStep(tpl *fakeTemplate, s *fakeStep, i int) map[string
 		}
 	}
 	out["deadline"] = s.deadline
+	for _, k := range []string{"assignees", "groups"} {
+		if v, ok := s.body[k]; ok {
+			out[k] = v
+		} else {
+			out[k] = []any{}
+		}
+	}
 	caps := make([]any, 0, len(s.captures))
 	for _, c := range s.captures {
 		caps = append(caps, c)
@@ -200,6 +215,24 @@ func (a *importAPI) renderStep(tpl *fakeTemplate, s *fakeStep, i int) map[string
 		out["stage_id"] = nil
 	}
 	return out
+}
+
+func (a *importAPI) listMembers(w http.ResponseWriter, kind string) {
+	a.memberLookups++
+	items := []any{}
+	if kind == "users" {
+		for id := range a.members {
+			n, _ := strconv.Atoi(id)
+			items = append(items, map[string]any{"id": n, "email": "member" + id + "@example.com"})
+		}
+	} else {
+		for id := range a.groups {
+			items = append(items, map[string]any{"id": id, "name": "group " + id})
+		}
+	}
+	b, _ := json.Marshal(map[string]any{"data": items, "meta": map[string]any{"pagination": map[string]any{
+		"total": len(items), "count": len(items), "per_page": 100, "current_page": 1, "total_pages": 1, "links": map[string]any{}}}})
+	writeJSON(w, 200, string(b))
 }
 
 func fail422(w http.ResponseWriter, msg string) {
@@ -271,6 +304,22 @@ func (a *importAPI) createStep(w http.ResponseWriter, tplID string, body map[str
 	if title == a.failStepTitle {
 		fail422(w, "rejected by the test")
 		return
+	}
+	// api-v2's org_user and org_group rules: every assignee must be in the
+	// target org (measured on staging 2026-10-27: a source-only member got
+	// 422 "Some users are not valid members of this organization").
+	for _, f := range []struct {
+		key     string
+		members map[string]bool
+		msg     string
+	}{{"assignees", a.members, "Some users are not valid members of this organization"}, {"groups", a.groups, "Some values are not valid groups of this organization"}} {
+		ids, _ := body[f.key].([]any)
+		for _, id := range ids {
+			if !f.members[fmt.Sprint(id)] {
+				fail422(w, f.msg)
+				return
+			}
+		}
 	}
 	// Measured on staging 2026-10-24: a present null answers 422 for these
 	// typed fields, while the nullable send_chromeless answers 201.
@@ -769,5 +818,169 @@ func TestBlueprintImportOrdersStepsByPosition(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("a file listing steps out of order did not import in position order\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// --- step assignees across orgs (tallyfy/work-queue#4280) -----------------
+
+// testdata/blueprint-export-assignees.json is a staging export (2026-10-27)
+// from a test org of a 4 step template: step 1 assigned to a user who is in
+// both test orgs (123 here), step 2 to a user only in the source org (456),
+// step 3 to a source org group, and step 4 to all three. The org ids, user
+// ids and group id are replaced.
+func assigneesFixture(t *testing.T, sourceOrg string) string {
+	t.Helper()
+	var obj map[string]any
+	if err := json.Unmarshal(readFixture(t, "blueprint-export-assignees.json"), &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj["exported_from_org"] != "org_source" {
+		t.Fatalf("fixture exported_from_org = %v, want org_source", obj["exported_from_org"])
+	}
+	if sourceOrg == "" {
+		delete(obj, "exported_from_org")
+	} else {
+		obj["exported_from_org"] = sourceOrg
+	}
+	path := filepath.Join(t.TempDir(), "assignees.json")
+	b, _ := json.Marshal(obj)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// stepAssignees reads the users and groups each created step ended up with.
+func stepAssignees(t *testing.T, api *importAPI, id string) []string {
+	t.Helper()
+	tpl := api.templates[id]
+	if tpl == nil {
+		t.Fatalf("no template %s", id)
+	}
+	out := make([]string, 0, len(tpl.steps))
+	for _, s := range tpl.steps {
+		out = append(out, fmt.Sprintf("users=%v groups=%v", s.body["assignees"], s.body["groups"]))
+	}
+	return out
+}
+
+func setMembers(api *importAPI, users []string, groups []string) {
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	for _, u := range users {
+		api.members[u] = true
+	}
+	for _, g := range groups {
+		api.groups[g] = true
+	}
+}
+
+// Same org: every assignee is kept, and the import does not look up members.
+func TestBlueprintImportSameOrgKeepsAssignees(t *testing.T) {
+	api, srv := newImportAPI(t)
+	setMembers(api, []string{"123", "456"}, []string{"grp_source_1"})
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", assigneesFixture(t, "org_test"), "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	want := []string{"users=[123] groups=[]", "users=[456] groups=[]", "users=[] groups=[grp_source_1]", "users=[123 456] groups=[grp_source_1]"}
+	if got := stepAssignees(t, api, importedID(t, res.stdout)); !reflect.DeepEqual(got, want) {
+		t.Errorf("assignees = %q\nwant every one kept %q", got, want)
+	}
+	if api.memberLookups != 0 {
+		t.Errorf("member lookups = %d, want 0 for a same-org import", api.memberLookups)
+	}
+	if strings.Contains(res.stderr, "leaves off") {
+		t.Errorf("a same-org import should not warn about assignees:\n%s", res.stderr)
+	}
+}
+
+// Another org with none of the assignees: the import completes, every
+// assignee is left off, and one warning names each.
+func TestBlueprintImportOtherOrgDropsNonMembers(t *testing.T) {
+	api, srv := newImportAPI(t)
+	setMembers(api, []string{"789"}, nil)
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", assigneesFixture(t, "org_source"), "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0 (the import completes); stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	want := []string{"users=[] groups=[]", "users=[] groups=[]", "users=[] groups=[]", "users=[] groups=[]"}
+	if got := stepAssignees(t, api, importedID(t, res.stdout)); !reflect.DeepEqual(got, want) {
+		t.Errorf("assignees = %q, want all left off %q", got, want)
+	}
+	if n := strings.Count(res.stderr, "leaves off"); n != 1 {
+		t.Errorf("warnings about assignees = %d, want exactly 1:\n%s", n, res.stderr)
+	}
+	for _, s := range []string{"exported from org org_source", "leaves off 6 assignee(s) that are not in org org_test",
+		`user 123 on step 1 ("wq4260 assign step 1 (member of both orgs)")`, `user 456 on step 2`, `group grp_source_1 on step 3`,
+		`user 123 on step 4`, `user 456 on step 4`, `group grp_source_1 on step 4`} {
+		if !strings.Contains(res.stderr, s) {
+			t.Errorf("warning missing %q:\n%s", s, res.stderr)
+		}
+	}
+}
+
+// Another org with some of the assignees: members are kept, the rest are
+// left off and named.
+func TestBlueprintImportOtherOrgKeepsMembers(t *testing.T) {
+	api, srv := newImportAPI(t)
+	setMembers(api, []string{"123"}, nil)
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", assigneesFixture(t, "org_source"), "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	want := []string{"users=[123] groups=[]", "users=[] groups=[]", "users=[] groups=[]", "users=[123] groups=[]"}
+	if got := stepAssignees(t, api, importedID(t, res.stdout)); !reflect.DeepEqual(got, want) {
+		t.Errorf("assignees = %q\nwant only user 123 kept %q", got, want)
+	}
+	if !strings.Contains(res.stderr, "leaves off 4 assignee(s)") || strings.Contains(res.stderr, "user 123") {
+		t.Errorf("warning should name the 4 left off and not user 123:\n%s", res.stderr)
+	}
+}
+
+// A file from before exports recorded their org: the import cannot tell, so
+// it checks, and keeps assignees that are members.
+func TestBlueprintImportUnknownOrgChecksAssignees(t *testing.T) {
+	api, srv := newImportAPI(t)
+	setMembers(api, []string{"123", "456"}, []string{"grp_source_1"})
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", assigneesFixture(t, ""), "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.memberLookups != 2 {
+		t.Errorf("member lookups = %d, want 2 (users and groups)", api.memberLookups)
+	}
+	want := []string{"users=[123] groups=[]", "users=[456] groups=[]", "users=[] groups=[grp_source_1]", "users=[123 456] groups=[grp_source_1]"}
+	if got := stepAssignees(t, api, importedID(t, res.stdout)); !reflect.DeepEqual(got, want) {
+		t.Errorf("assignees = %q\nwant every member kept %q", got, want)
+	}
+}
+
+// Export records the org it ran against as the first key, and leaves the
+// API's object as it was after that.
+func TestBlueprintExportRecordsOrg(t *testing.T) {
+	_, srv := newImportAPI(t)
+	out := filepath.Join(t.TempDir(), "export.json")
+	if res := run(t, srv.URL, "", "blueprint", "export", importSource, "--out", out); res.code != 0 {
+		t.Fatalf("export exit = %d; stderr=%s", res.code, res.stderr)
+	}
+	b, _ := os.ReadFile(out)
+	if !strings.HasPrefix(string(b), "{\n  \"exported_from_org\": \"org_test\",\n") {
+		t.Errorf("export does not start with the org key:\n%.200s", b)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(b, &obj); err != nil {
+		t.Fatalf("export is not JSON: %v", err)
+	}
+	if obj["id"] != importSource {
+		t.Errorf("export lost the blueprint's own fields: id = %v", obj["id"])
 	}
 }
