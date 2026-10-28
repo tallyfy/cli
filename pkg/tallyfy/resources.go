@@ -155,10 +155,61 @@ func (c *Client) PublishBlueprint(ctx context.Context, org, id string) error {
 	return err
 }
 
-// GetBlueprintSteps returns a template's steps as raw JSON.
+// GetBlueprintSteps returns every step of a template as one raw JSON array,
+// in the API's order (position).
 // GET /organizations/{org}/checklists/{id}/steps
+//
+// api-v2 pages this route at 10 steps when no per_page is sent
+// (BaseControllerNew::getQueryBuilderParams), so this asks for the largest
+// page and still follows every page until the last one.
 func (c *Client) GetBlueprintSteps(ctx context.Context, org, id string) (json.RawMessage, error) {
-	return doData(ctx, c, http.MethodGet, orgPath(org, "checklists", id, "steps"), nil, nil)
+	steps, _, err := CollectAll[json.RawMessage](ctx, c, orgPath(org, "checklists", id, "steps"), ListOptions{All: true})
+	if err != nil {
+		return nil, err
+	}
+	if steps == nil {
+		steps = []json.RawMessage{}
+	}
+	return json.Marshal(steps)
+}
+
+// CreateBlueprintStep adds a step to the end of a template from a
+// caller-built payload (title, checklist_id, captures...). The API takes no
+// position on create: each new step goes last.
+// POST /organizations/{org}/checklists/{checklist_id}/steps
+func (c *Client) CreateBlueprintStep(ctx context.Context, org, checklistID string, payload json.RawMessage) (json.RawMessage, error) {
+	return doData(ctx, c, http.MethodPost, orgPath(org, "checklists", checklistID, "steps"), nil, payload)
+}
+
+// UpdateBlueprintStep updates one step. The API requires "title" in the body
+// unless the body is a position-only reorder.
+// PUT /organizations/{org}/checklists/{checklist_id}/steps/{step_id}
+func (c *Client) UpdateBlueprintStep(ctx context.Context, org, checklistID, stepID string, payload json.RawMessage) (json.RawMessage, error) {
+	return doData(ctx, c, http.MethodPut, orgPath(org, "checklists", checklistID, "steps", stepID), nil, payload)
+}
+
+// CreateBlueprintMilestone adds a milestone (API name: stage) to a template.
+// POST /organizations/{org}/stages with
+// {"title", "subject_id": template id, "subject_type": "Checklist", "position"}
+func (c *Client) CreateBlueprintMilestone(ctx context.Context, org, checklistID, title string, position int) (json.RawMessage, error) {
+	body := struct {
+		Title       string `json:"title"`
+		SubjectID   string `json:"subject_id"`
+		SubjectType string `json:"subject_type"`
+		Position    int    `json:"position"`
+	}{Title: title, SubjectID: checklistID, SubjectType: "Checklist", Position: position}
+	return doData(ctx, c, http.MethodPost, orgPath(org, "stages"), nil, body)
+}
+
+// LinkStepMilestone puts a step under one of its template's milestones.
+// stageID is the milestone id exactly as the API returned it.
+// PUT /organizations/{org}/checklists/{checklist_id}/steps/{step_id}/link-stage
+// with {"stage_id": id}
+func (c *Client) LinkStepMilestone(ctx context.Context, org, checklistID, stepID string, stageID json.Number) (json.RawMessage, error) {
+	body := struct {
+		StageID json.Number `json:"stage_id"`
+	}{StageID: stageID}
+	return doData(ctx, c, http.MethodPut, orgPath(org, "checklists", checklistID, "steps", stepID, "link-stage"), nil, body)
 }
 
 // GetKickoffFields returns a template's kick-off form fields.

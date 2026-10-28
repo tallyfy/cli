@@ -314,7 +314,7 @@ func blueprintExportCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "export <id>",
 		Short: "Export a blueprint to JSON (git-committable)",
-		Long:  "Fetch a blueprint with its steps and automated actions and write the raw JSON to stdout, or to --out. This is the form consumed by `blueprint import`.",
+		Long:  "Fetch a blueprint with its steps, milestones and automated actions and write the raw JSON to stdout, or to --out, with \"exported_from_org\" added as the first key. This is the form consumed by `blueprint import`.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, org, err := blueprintContext(cmd)
@@ -325,12 +325,16 @@ func blueprintExportCmd() *cobra.Command {
 			if err := ctx.Guard("Blueprint", "export", "", hooks.Payload{Resource: "blueprint", ID: id}); err != nil {
 				return err
 			}
-			_, raw, err := ctx.API.GetBlueprint(cmd.Context(), org, id, []string{"steps", "automated_actions"})
+			// "stages" carries the milestone titles, so an import can re-create
+			// them; the steps only carry each one's stage_id.
+			_, raw, err := ctx.API.GetBlueprint(cmd.Context(), org, id, []string{"steps", "automated_actions", "stages"})
 			if err != nil {
 				return err
 			}
 			out, _ := cmd.Flags().GetString("out")
-			return l6WritePrettyJSON(raw, out)
+			// Record the source org, so an import can tell whether the step
+			// assignees belong to the org it imports into.
+			return l6WritePrettyJSON(withExportOrg(raw, org), out)
 		},
 	}
 	cmd.Flags().String("out", "", "write to this file instead of stdout")
@@ -347,7 +351,21 @@ Server-managed fields (id, owner_id, created_by, alias, steps_count,
 industry_tags, topic_tags, folder_id, kickoff_title, kickoff_description,
 started_processes, created_at, last_updated, archived_at) are stripped before
 POST so the snapshot re-creates cleanly. Combine with --org to promote a
-blueprint into another organization (workflows-as-code).`,
+blueprint into another organization (workflows-as-code).
+
+The API's template create takes no steps, so the import creates the template
+with its kick-off fields, then its milestones, then each step in the file's
+order with its form fields,
+puts each step back under its milestone, and re-points any deadline that
+counts from another step at the new copy of that step. If a request fails
+part way, the error names the blueprint that was created so you can delete it.
+Automations are not re-created yet; the import warns when the file has any.
+
+Step assignees (users and groups) are kept when the file was exported from
+the org you import into. Otherwise the import checks them against that org's
+members and groups first, leaves off any that are not in it, and prints one
+warning naming them, so a promotion into another org does not stop at the
+first assigned step.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, org, err := blueprintContext(cmd)
@@ -358,18 +376,7 @@ blueprint into another organization (workflows-as-code).`,
 			if err != nil {
 				return &UsageError{Msg: err.Error()}
 			}
-			var obj map[string]json.RawMessage
-			if err := json.Unmarshal(data, &obj); err != nil {
-				return &UsageError{Msg: "import file must be a JSON object: " + err.Error()}
-			}
-			stripped := make([]string, 0, len(blueprintImportStripFields))
-			for _, f := range blueprintImportStripFields {
-				if _, ok := obj[f]; ok {
-					delete(obj, f)
-					stripped = append(stripped, f)
-				}
-			}
-			payload, err := json.Marshal(obj)
+			plan, err := parseImportPlan(data)
 			if err != nil {
 				return err
 			}
@@ -377,21 +384,36 @@ blueprint into another organization (workflows-as-code).`,
 			if err := ctx.Guard("Blueprint", "import", hooks.PreImport, evtPayload); err != nil {
 				return err
 			}
+			if plan.automations > 0 {
+				ctx.Infof("warning: the file has %d automation(s), and import does not re-create automations yet, so add them again in Tallyfy\n", plan.automations)
+			}
 			if ctx.DryRun {
 				ctx.DryRunf("POST /organizations/%s/checklists (import from %s)", org, args[0])
-				if len(stripped) == 0 {
+				ctx.DryRunf("then %d milestone(s) (POST /organizations/%s/stages) and %d step(s) in order (POST /organizations/%s/checklists/{new id}/steps)",
+					len(plan.milestones), org, len(plan.steps), org)
+				if plan.checksAssignees(org) {
+					ctx.DryRunf("first check step assignees against the members and groups of org %s (%s), and leave off any that are not in it", org, plan.sourceDescription())
+				}
+				if len(plan.stripped) == 0 {
 					ctx.Printf("stripped system fields: (none present)\n")
 				} else {
-					ctx.Printf("stripped system fields: %s\n", strings.Join(stripped, ", "))
+					ctx.Printf("stripped system fields: %s\n", strings.Join(plan.stripped, ", "))
 				}
 				return nil
 			}
-			b, raw, err := ctx.API.CreateBlueprint(cmd.Context(), org, payload)
+			res, err := runBlueprintImport(cmd.Context(), ctx, org, plan)
 			if err != nil {
 				return err
 			}
-			evtPayload.ID = b.ID
+			evtPayload.ID = res.blueprint.ID
 			ctx.FirePost(hooks.PostImport, evtPayload, "Blueprint", "import")
+			ctx.Infof("imported blueprint %s with %d step(s) and %d milestone(s)\n", res.blueprint.ID, res.steps, res.milestones)
+			// The create response predates the steps (steps_count 0), so show
+			// the blueprint as it stands now; fall back to the create response.
+			b, raw := res.blueprint, res.raw
+			if fresh, freshRaw, gerr := ctx.API.GetBlueprint(cmd.Context(), org, res.blueprint.ID, nil); gerr == nil {
+				b, raw = fresh, freshRaw
+			}
 			return blueprintRenderResult(ctx, b, raw)
 		},
 	}
