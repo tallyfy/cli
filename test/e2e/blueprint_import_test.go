@@ -58,6 +58,15 @@ type importAPI struct {
 	members       map[string]bool
 	groups        map[string]bool
 	memberLookups int
+
+	// The target org's tags (id -> title), whether it has single sign-on on,
+	// and its company domains. Every member's email is member<id>@example.com.
+	tags        map[string]string
+	samlEnabled bool
+	domains     []string
+	lookups     map[string]int    // GETs per lookup route: users, groups, tags, org, domains
+	lookupQuery map[string]string // the last query string each lookup route got
+	failLookup  string            // a lookup route that answers 500
 }
 
 type fakeTemplate struct {
@@ -83,7 +92,8 @@ type fakeStage struct {
 
 func newImportAPI(t *testing.T) (*importAPI, *httptest.Server) {
 	t.Helper()
-	api := &importAPI{templates: map[string]*fakeTemplate{}, stepOwner: map[string]string{}, members: map[string]bool{}, groups: map[string]bool{}}
+	api := &importAPI{templates: map[string]*fakeTemplate{}, stepOwner: map[string]string{}, members: map[string]bool{}, groups: map[string]bool{},
+		tags: map[string]string{}, lookups: map[string]int{}, lookupQuery: map[string]string{}}
 	if err := json.Unmarshal(readFixture(t, "blueprint-export-milestone.json"), &api.source); err != nil {
 		t.Fatal(err)
 	}
@@ -100,6 +110,13 @@ func (a *importAPI) handle(w http.ResponseWriter, r *http.Request) {
 	defer a.mu.Unlock()
 
 	const prefix = "/organizations/org_test/"
+	if r.Method == http.MethodGet && r.URL.Path == strings.TrimSuffix(prefix, "/") {
+		if a.lookup(w, r, "org") {
+			b, _ := json.Marshal(map[string]any{"data": map[string]any{"id": "org_test", "name": "Test org", "saml_enabled": a.samlEnabled}})
+			writeJSON(w, 200, string(b))
+		}
+		return
+	}
 	if !strings.HasPrefix(r.URL.Path, prefix) {
 		writeJSON(w, 404, `{"error":true,"message":"no mock route"}`)
 		return
@@ -119,7 +136,24 @@ func (a *importAPI) handle(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet && len(parts) == 2 && parts[0] == "checklists":
 		a.getTemplate(w, parts[1], with)
 	case r.Method == http.MethodGet && len(parts) == 1 && (parts[0] == "users" || parts[0] == "groups"):
-		a.listMembers(w, parts[0])
+		if a.lookup(w, r, parts[0]) {
+			a.listMembers(w, parts[0])
+		}
+	case r.Method == http.MethodGet && len(parts) == 1 && parts[0] == "tags":
+		if a.lookup(w, r, "tags") {
+			a.listTags(w, r.URL.Query().Get("all") == "true")
+		}
+	case r.Method == http.MethodGet && len(parts) == 1 && parts[0] == "domains":
+		if a.lookup(w, r, "domains") {
+			// api-v2 answers this route as a bare collection, with no
+			// pagination meta (OrganizationsDomainsController::index).
+			items := []any{}
+			for i, d := range a.domains {
+				items = append(items, map[string]any{"id": i + 1, "name": d, "organization_id": "org_test"})
+			}
+			b, _ := json.Marshal(map[string]any{"data": items})
+			writeJSON(w, 200, string(b))
+		}
 	case r.Method == http.MethodPost && len(parts) == 1 && parts[0] == "checklists":
 		a.createTemplate(w, body)
 	case r.Method == http.MethodPost && len(parts) == 3 && parts[0] == "checklists" && parts[2] == "steps":
@@ -235,6 +269,52 @@ func (a *importAPI) listMembers(w http.ResponseWriter, kind string) {
 	writeJSON(w, 200, string(b))
 }
 
+// lookup counts a GET on a lookup route and answers 500 when the test asked
+// that route to fail. It reports whether the caller should answer.
+func (a *importAPI) lookup(w http.ResponseWriter, r *http.Request, route string) bool {
+	a.lookups[route]++
+	a.lookupQuery[route] = r.URL.RawQuery
+	if a.failLookup == route {
+		writeJSON(w, 500, `{"error":true,"message":"lookup failed on purpose"}`)
+		return false
+	}
+	return true
+}
+
+// listTags mirrors api-v2's tags index: without all=true it leaves out the
+// tags made for processes, whose titles start "from:", "task:" or "step:"
+// (TagsController::index, Tag::scopeWithoutAutoProcessTags).
+func (a *importAPI) listTags(w http.ResponseWriter, all bool) {
+	items := []any{}
+	for id, title := range a.tags {
+		if !all && (strings.HasPrefix(title, "from:") || strings.HasPrefix(title, "task:") || strings.HasPrefix(title, "step:")) {
+			continue
+		}
+		items = append(items, map[string]any{"id": id, "title": title})
+	}
+	b, _ := json.Marshal(map[string]any{"data": items, "meta": map[string]any{"pagination": map[string]any{
+		"total": len(items), "count": len(items), "per_page": 100, "current_page": 1, "total_pages": 1, "links": map[string]any{}}}})
+	writeJSON(w, 200, string(b))
+}
+
+// guestRefusal mirrors api-v2's ValidGuestEmail for the two checks that
+// depend on the org: the email is lowercased, then refused when single
+// sign-on is on and its domain is a company domain, or when it is a member's.
+func (a *importAPI) guestRefusal(email string) string {
+	e := strings.ToLower(email)
+	if a.samlEnabled {
+		if _, domain, ok := strings.Cut(e, "@"); ok && has(a.domains, domain) {
+			return `"` + e + `" uses the company domain ` + domain + `, which signs in with single sign-on.`
+		}
+	}
+	for id := range a.members {
+		if e == "member"+id+"@example.com" {
+			return `The email address "` + e + `" is already a member of this organization.`
+		}
+	}
+	return ""
+}
+
 func fail422(w http.ResponseWriter, msg string) {
 	b, _ := json.Marshal(map[string]any{"error": true, "message": msg})
 	writeJSON(w, 422, string(b))
@@ -244,6 +324,23 @@ func (a *importAPI) createTemplate(w http.ResponseWriter, body map[string]any) {
 	if _, ok := body["type"]; !ok {
 		fail422(w, "The type field is required.")
 		return
+	}
+	// CreateChecklistRequest: the template's own users and groups must be in
+	// the org (org_user, org_group), and its default tag must be one of the
+	// org's tags.
+	if msg := a.refusedAssignee(body, "users"); msg != "" {
+		fail422(w, msg)
+		return
+	}
+	if msg := a.refusedAssignee(body, "groups"); msg != "" {
+		fail422(w, msg)
+		return
+	}
+	if tag, _ := body["default_tag"].(string); tag != "" {
+		if _, ok := a.tags[tag]; !ok {
+			fail422(w, "The selected default tag is invalid.")
+			return
+		}
 	}
 	a.nextTemplate++
 	tpl := &fakeTemplate{id: fmt.Sprintf("bp_imp_%d", a.nextTemplate), fields: map[string]any{}}
@@ -271,6 +368,23 @@ func (a *importAPI) createTemplate(w http.ResponseWriter, body map[string]any) {
 	a.templates[tpl.id] = tpl
 	b, _ := json.Marshal(map[string]any{"data": map[string]any{"id": tpl.id, "title": body["title"], "status": "started", "steps_count": 0}})
 	writeJSON(w, 201, string(b))
+}
+
+// refusedAssignee checks a list of user ids ("users", "assignees") or group
+// ids ("groups") the way org_user and org_group do, and returns the 422
+// message, or "" when every one is in the org.
+func (a *importAPI) refusedAssignee(body map[string]any, key string) string {
+	members, msg := a.members, "Some users are not valid members of this organization"
+	if key == "groups" {
+		members, msg = a.groups, "Some values are not valid groups of this organization"
+	}
+	ids, _ := body[key].([]any)
+	for _, id := range ids {
+		if !members[fmt.Sprint(id)] {
+			return msg
+		}
+	}
+	return ""
 }
 
 func (a *importAPI) validDeadline(d any) (map[string]any, bool) {
@@ -308,17 +422,17 @@ func (a *importAPI) createStep(w http.ResponseWriter, tplID string, body map[str
 	// api-v2's org_user and org_group rules: every assignee must be in the
 	// target org (measured on staging 2026-10-27: a source-only member got
 	// 422 "Some users are not valid members of this organization").
-	for _, f := range []struct {
-		key     string
-		members map[string]bool
-		msg     string
-	}{{"assignees", a.members, "Some users are not valid members of this organization"}, {"groups", a.groups, "Some values are not valid groups of this organization"}} {
-		ids, _ := body[f.key].([]any)
-		for _, id := range ids {
-			if !f.members[fmt.Sprint(id)] {
-				fail422(w, f.msg)
-				return
-			}
+	for _, key := range []string{"assignees", "groups"} {
+		if msg := a.refusedAssignee(body, key); msg != "" {
+			fail422(w, msg)
+			return
+		}
+	}
+	guests, _ := body["guests"].([]any)
+	for _, g := range guests {
+		if msg := a.guestRefusal(fmt.Sprint(g)); msg != "" {
+			fail422(w, msg)
+			return
 		}
 	}
 	// Measured on staging 2026-10-24: a present null answers 422 for these
@@ -830,12 +944,36 @@ func TestBlueprintImportOrdersStepsByPosition(t *testing.T) {
 // ids and group id are replaced.
 func assigneesFixture(t *testing.T, sourceOrg string) string {
 	t.Helper()
+	return assigneesFixtureWith(t, sourceOrg, nil)
+}
+
+// assigneesFixtureWith is assigneesFixture with edit applied to the parsed
+// file first. edit gets the blueprint object and its steps in file order.
+func assigneesFixtureWith(t *testing.T, sourceOrg string, edit func(bp map[string]any, steps []map[string]any)) string {
+	t.Helper()
 	var obj map[string]any
 	if err := json.Unmarshal(readFixture(t, "blueprint-export-assignees.json"), &obj); err != nil {
 		t.Fatal(err)
 	}
 	if obj["exported_from_org"] != "org_source" {
 		t.Fatalf("fixture exported_from_org = %v, want org_source", obj["exported_from_org"])
+	}
+	if edit != nil {
+		// The recorded export has these, all empty; the edits fill them in.
+		for _, k := range []string{"users", "groups", "default_tag"} {
+			if _, ok := obj[k]; !ok {
+				t.Fatalf("fixture has no %q key", k)
+			}
+		}
+		raw := obj["steps"].(map[string]any)["data"].([]any)
+		steps := make([]map[string]any, len(raw))
+		for i, s := range raw {
+			steps[i] = s.(map[string]any)
+			if _, ok := steps[i]["guests"]; !ok {
+				t.Fatalf("fixture step %d has no guests key", i+1)
+			}
+		}
+		edit(obj, steps)
 	}
 	if sourceOrg == "" {
 		delete(obj, "exported_from_org")
@@ -982,5 +1120,384 @@ func TestBlueprintExportRecordsOrg(t *testing.T) {
 	}
 	if obj["id"] != importSource {
 		t.Errorf("export lost the blueprint's own fields: id = %v", obj["id"])
+	}
+}
+
+// --- what else another org refuses (tallyfy/work-queue#4280) -------------
+
+// configure changes the fake's target org under its lock.
+func configure(api *importAPI, f func(a *importAPI)) {
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	f(api)
+}
+
+// totalLookups counts every GET on a lookup route. The caller holds api.mu.
+func totalLookups(api *importAPI) int {
+	n := 0
+	for _, c := range api.lookups {
+		n += c
+	}
+	return n
+}
+
+// templateField reads a field as the template create got it, as JSON.
+func templateField(t *testing.T, api *importAPI, id, key string) string {
+	t.Helper()
+	tpl := api.templates[id]
+	if tpl == nil {
+		t.Fatalf("no template %s", id)
+	}
+	v, ok := tpl.fields[key]
+	if !ok {
+		return "(absent)"
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+// stepGuests reads the guests each created step ended up with.
+func stepGuests(t *testing.T, api *importAPI, id string) []string {
+	t.Helper()
+	tpl := api.templates[id]
+	if tpl == nil {
+		t.Fatalf("no template %s", id)
+	}
+	out := make([]string, 0, len(tpl.steps))
+	for _, s := range tpl.steps {
+		out = append(out, fmt.Sprint(s.body["guests"]))
+	}
+	return out
+}
+
+// clearAssignees empties every step's users and groups, so a test looks at
+// one kind of check at a time.
+func clearAssignees(steps []map[string]any) {
+	for _, s := range steps {
+		s["assignees"], s["groups"] = []any{}, []any{}
+	}
+}
+
+// The blueprint's own users and groups are checked like step assignees
+// (CreateChecklistRequest: org_user, org_group): members are kept, and the
+// rest are left off and named in the same one warning.
+func TestBlueprintImportOtherOrgTemplateAssignees(t *testing.T) {
+	api, srv := newImportAPI(t)
+	setMembers(api, []string{"123"}, nil)
+	path := assigneesFixtureWith(t, "org_source", func(bp map[string]any, _ []map[string]any) {
+		bp["users"] = []any{123, 456}
+		bp["groups"] = []any{"grp_source_1"}
+	})
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", path, "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0 (the import completes); stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	id := importedID(t, res.stdout)
+	if got := templateField(t, api, id, "users"); got != "[123]" {
+		t.Errorf("blueprint users = %s, want [123]", got)
+	}
+	if got := templateField(t, api, id, "groups"); got != "[]" {
+		t.Errorf("blueprint groups = %s, want []", got)
+	}
+	if n := strings.Count(res.stderr, "assignee(s) that are not in org"); n != 1 {
+		t.Errorf("assignee warnings = %d, want exactly 1:\n%s", n, res.stderr)
+	}
+	for _, s := range []string{"leaves off 6 assignee(s) that are not in org org_test", "user 456 on the blueprint",
+		"group grp_source_1 on the blueprint", "user 456 on step 2", "group grp_source_1 on step 3"} {
+		if !strings.Contains(res.stderr, s) {
+			t.Errorf("warning missing %q:\n%s", s, res.stderr)
+		}
+	}
+	if strings.Contains(res.stderr, "user 123") {
+		t.Errorf("the warning names user 123, who is a member:\n%s", res.stderr)
+	}
+}
+
+// The blueprint's default tag must be one of the org's tags. When it is not,
+// the import leaves it off and says so. Process tags count as tags, so the
+// lookup must ask for them too.
+func TestBlueprintImportOtherOrgDefaultTag(t *testing.T) {
+	path := assigneesFixtureWith(t, "org_source", func(bp map[string]any, steps []map[string]any) {
+		bp["default_tag"] = "tag_source_1"
+		clearAssignees(steps)
+	})
+	for _, tc := range []struct {
+		name, tagID, tagTitle string
+		want                  string // the default_tag the template create got
+	}{
+		{"not in the org", "tag_other", "other", "(absent)"},
+		{"a process tag of the org", "tag_source_1", "step:approve", `"tag_source_1"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, srv := newImportAPI(t)
+			configure(api, func(a *importAPI) { a.tags[tc.tagID] = tc.tagTitle })
+			res := run(t, srv.URL, "", "--yes", "blueprint", "import", path, "-o", "json")
+			if res.code != 0 {
+				t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+			}
+			api.mu.Lock()
+			defer api.mu.Unlock()
+			if got := templateField(t, api, importedID(t, res.stdout), "default_tag"); got != tc.want {
+				t.Errorf("default_tag = %s, want %s", got, tc.want)
+			}
+			warned := strings.Contains(res.stderr, "leaves off the default tag tag_source_1, which is not in org org_test")
+			if warned != (tc.want == "(absent)") {
+				t.Errorf("default tag warning = %v, want %v:\n%s", warned, !warned, res.stderr)
+			}
+			if api.lookups["tags"] != 1 || api.lookups["users"] != 0 || api.lookups["groups"] != 0 {
+				t.Errorf("lookups = %v, want only the tags list", api.lookups)
+			}
+			if !strings.Contains(api.lookupQuery["tags"], "all=true") {
+				t.Errorf("tags lookup query = %q, want all=true so process tags are listed", api.lookupQuery["tags"])
+			}
+		})
+	}
+}
+
+// A step guest whose email belongs to a member of the org, or is at one of
+// its company domains while single sign-on is on, is refused by api-v2's
+// ValidGuestEmail. The import leaves such guests off, names each with the
+// reason, and keeps the rest.
+func TestBlueprintImportOtherOrgGuests(t *testing.T) {
+	path := assigneesFixtureWith(t, "org_source", func(_ map[string]any, steps []map[string]any) {
+		clearAssignees(steps)
+		steps[0]["guests"] = []any{"Member123@Example.com"}
+		steps[1]["guests"] = []any{"pat@corp.example"}
+		steps[2]["guests"] = []any{"outsider@elsewhere.example"}
+		steps[3]["guests"] = []any{"member123@example.com", "pat@corp.example", "outsider@elsewhere.example"}
+	})
+	for _, tc := range []struct {
+		name    string
+		sso     bool
+		want    []string
+		warning []string
+		domains int // lookups of the company domains
+	}{
+		{"single sign-on on", true,
+			[]string{"[]", "[]", "[outsider@elsewhere.example]", "[outsider@elsewhere.example]"},
+			[]string{"leaves off 4 guest(s) that org org_test would refuse",
+				`guest Member123@Example.com on step 1 ("wq4260 assign step 1 (member of both orgs)") (already a member)`,
+				`guest pat@corp.example on step 2 ("wq4260 assign step 2 (source-only member)") (single sign-on domain corp.example)`,
+				`guest member123@example.com on step 4 ("wq4260 assign step 4 (mixed)") (already a member)`,
+				`guest pat@corp.example on step 4 ("wq4260 assign step 4 (mixed)") (single sign-on domain corp.example)`},
+			1},
+		{"single sign-on off", false,
+			[]string{"[]", "[pat@corp.example]", "[outsider@elsewhere.example]", "[pat@corp.example outsider@elsewhere.example]"},
+			[]string{"leaves off 2 guest(s) that org org_test would refuse"},
+			0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, srv := newImportAPI(t)
+			configure(api, func(a *importAPI) {
+				a.members["123"] = true
+				a.samlEnabled = tc.sso
+				a.domains = []string{"corp.example"}
+			})
+			res := run(t, srv.URL, "", "--yes", "blueprint", "import", path, "-o", "json")
+			if res.code != 0 {
+				t.Fatalf("exit = %d, want 0 (the import completes); stderr=%s", res.code, res.stderr)
+			}
+			api.mu.Lock()
+			defer api.mu.Unlock()
+			if got := stepGuests(t, api, importedID(t, res.stdout)); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("guests = %q\nwant %q", got, tc.want)
+			}
+			if n := strings.Count(res.stderr, "guest(s) that org"); n != 1 {
+				t.Errorf("guest warnings = %d, want exactly 1:\n%s", n, res.stderr)
+			}
+			for _, s := range tc.warning {
+				if !strings.Contains(res.stderr, s) {
+					t.Errorf("warning missing %q:\n%s", s, res.stderr)
+				}
+			}
+			if strings.Contains(res.stderr, "guest outsider@") {
+				t.Errorf("the warning names a guest the org takes:\n%s", res.stderr)
+			}
+			if api.lookups["users"] != 1 || api.lookups["org"] != 1 || api.lookups["domains"] != tc.domains || api.lookups["groups"] != 0 {
+				t.Errorf("lookups = %v, want users 1, org 1, domains %d, groups 0", api.lookups, tc.domains)
+			}
+		})
+	}
+}
+
+// Into the org the file came from, the blueprint's users, groups and default
+// tag and the step guests are kept as exported, and nothing is looked up.
+func TestBlueprintImportSameOrgKeepsEverything(t *testing.T) {
+	api, srv := newImportAPI(t)
+	configure(api, func(a *importAPI) {
+		a.members["123"], a.members["456"], a.groups["grp_source_1"] = true, true, true
+		a.tags["tag_source_1"] = "source"
+	})
+	path := assigneesFixtureWith(t, "org_test", func(bp map[string]any, steps []map[string]any) {
+		bp["users"] = []any{123, 456}
+		bp["groups"] = []any{"grp_source_1"}
+		bp["default_tag"] = "tag_source_1"
+		steps[0]["guests"] = []any{"outsider@elsewhere.example"}
+	})
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", path, "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	id := importedID(t, res.stdout)
+	for key, want := range map[string]string{"users": "[123,456]", "groups": `["grp_source_1"]`, "default_tag": `"tag_source_1"`} {
+		if got := templateField(t, api, id, key); got != want {
+			t.Errorf("blueprint %s = %s, want %s", key, got, want)
+		}
+	}
+	if got := stepGuests(t, api, id); got[0] != "[outsider@elsewhere.example]" {
+		t.Errorf("step 1 guests = %s, want the exported guest", got[0])
+	}
+	if n := totalLookups(api); n != 0 {
+		t.Errorf("lookups = %v, want none for a same-org import", api.lookups)
+	}
+	if strings.Contains(res.stderr, "leaves off") {
+		t.Errorf("a same-org import should leave nothing off:\n%s", res.stderr)
+	}
+}
+
+// A file with nothing to check (no users, groups, default tag or guests)
+// imports into another org without a lookup or a warning. Added from the
+// review of tallyfy/cli#20.
+func TestBlueprintImportNothingToCheckLooksNothingUp(t *testing.T) {
+	src := filepath.Join("testdata", "blueprint-export-milestone.json")
+	var obj struct {
+		From   *string `json:"exported_from_org"`
+		Users  []any   `json:"users"`
+		Groups []any   `json:"groups"`
+		Tag    *string `json:"default_tag"`
+		Steps  struct {
+			Data []struct {
+				Assignees []any `json:"assignees"`
+				Groups    []any `json:"groups"`
+				Guests    []any `json:"guests"`
+			} `json:"data"`
+		} `json:"steps"`
+	}
+	b, _ := os.ReadFile(src)
+	if err := json.Unmarshal(b, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if obj.From != nil || len(obj.Users)+len(obj.Groups) > 0 || obj.Tag != nil || len(obj.Steps.Data) != 3 {
+		t.Fatalf("fixture is not a cross-org file with nothing to check: %+v", obj)
+	}
+	for i, s := range obj.Steps.Data {
+		if len(s.Assignees)+len(s.Groups)+len(s.Guests) > 0 {
+			t.Fatalf("fixture step %d has assignees or guests: %+v", i+1, s)
+		}
+	}
+	api, srv := newImportAPI(t)
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", src, "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if n := totalLookups(api); n != 0 || api.memberLookups != 0 {
+		t.Errorf("lookups = %v, want none", api.lookups)
+	}
+	if strings.Contains(res.stderr, "leaves off") {
+		t.Errorf("nothing should be left off:\n%s", res.stderr)
+	}
+}
+
+// A template whose steps name only groups is checked against the groups
+// list alone: members of no kind are looked up. Added from the review of
+// tallyfy/cli#20.
+func TestBlueprintImportOtherOrgGroupsOnly(t *testing.T) {
+	api, srv := newImportAPI(t)
+	setMembers(api, nil, []string{"grp_source_1"})
+	path := assigneesFixtureWith(t, "org_source", func(_ map[string]any, steps []map[string]any) {
+		clearAssignees(steps)
+		steps[2]["groups"] = []any{"grp_source_1"}
+		steps[3]["groups"] = []any{"grp_source_1", "grp_source_2"}
+	})
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", path, "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	want := []string{"users=[] groups=[]", "users=[] groups=[]", "users=[] groups=[grp_source_1]", "users=[] groups=[grp_source_1]"}
+	if got := stepAssignees(t, api, importedID(t, res.stdout)); !reflect.DeepEqual(got, want) {
+		t.Errorf("assignees = %q\nwant %q", got, want)
+	}
+	if !strings.Contains(res.stderr, `leaves off 1 assignee(s) that are not in org org_test: group grp_source_2 on step 4 ("wq4260 assign step 4 (mixed)")`) {
+		t.Errorf("warning should name grp_source_2 alone:\n%s", res.stderr)
+	}
+	if api.lookups["groups"] != 1 || api.lookups["users"] != 0 {
+		t.Errorf("lookups = %v, want the groups list only", api.lookups)
+	}
+}
+
+// A lookup that fails stops the import before anything is created, and says
+// it was the check that failed. Added from the review of tallyfy/cli#20.
+func TestBlueprintImportFailedLookupCreatesNothing(t *testing.T) {
+	path := assigneesFixtureWith(t, "org_source", func(bp map[string]any, steps []map[string]any) {
+		bp["default_tag"] = "tag_source_1"
+		steps[0]["guests"] = []any{"outsider@elsewhere.example"}
+	})
+	for _, route := range []string{"users", "groups", "tags", "org", "domains"} {
+		t.Run(route, func(t *testing.T) {
+			api, srv := newImportAPI(t)
+			configure(api, func(a *importAPI) {
+				a.failLookup = route
+				a.samlEnabled = true
+				a.domains = []string{"corp.example"}
+			})
+			res := run(t, srv.URL, "", "--yes", "blueprint", "import", path, "-o", "json")
+			if res.code == 0 {
+				t.Fatalf("exit = 0, want a failure when the %s lookup fails; stderr=%s", route, res.stderr)
+			}
+			for _, s := range []string{"against org org_test before creating anything", "lookup failed on purpose"} {
+				if !strings.Contains(res.stderr, s) {
+					t.Errorf("stderr missing %q:\n%s", s, res.stderr)
+				}
+			}
+			api.mu.Lock()
+			defer api.mu.Unlock()
+			if api.lookups[route] != 1 {
+				t.Errorf("the %s lookup ran %d time(s), want 1 (the failure must come from it)", route, api.lookups[route])
+			}
+			if api.posts != 0 || len(api.templates) != 0 {
+				t.Errorf("writes = %d, templates = %d, want nothing created", api.posts, len(api.templates))
+			}
+		})
+	}
+}
+
+// --dry-run says what it would check, looks nothing up and writes nothing.
+// Added from the review of tallyfy/cli#20.
+func TestBlueprintImportDryRunSaysWhatItChecks(t *testing.T) {
+	api, srv := newImportAPI(t)
+	cross := assigneesFixtureWith(t, "org_source", func(bp map[string]any, steps []map[string]any) {
+		bp["default_tag"] = "tag_source_1"
+		steps[0]["guests"] = []any{"outsider@elsewhere.example"}
+	})
+	for _, tc := range []struct {
+		name, path, want string
+	}{
+		{"another org", cross, "[dry-run] first check the assigned users and groups, default tag and step guests against org org_test (the file was exported from org org_source), and leave off what org org_test would refuse"},
+		{"an older file", assigneesFixture(t, ""), "[dry-run] first check the assigned users and groups against org org_test (the file does not say which org it was exported from), and leave off what org org_test would refuse"},
+		{"the same org", assigneesFixture(t, "org_test"), ""},
+	} {
+		res := run(t, srv.URL, "", "blueprint", "import", tc.path, "--dry-run")
+		if res.code != 0 {
+			t.Fatalf("%s: exit = %d, want 0; stderr=%s", tc.name, res.code, res.stderr)
+		}
+		if tc.want == "" && strings.Contains(res.stdout, "first check") {
+			t.Errorf("%s: dry run should check nothing:\n%s", tc.name, res.stdout)
+		}
+		if tc.want != "" && !strings.Contains(res.stdout, tc.want+"\n") {
+			t.Errorf("%s: dry run missing\n%s\ngot:\n%s", tc.name, tc.want, res.stdout)
+		}
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.posts != 0 || totalLookups(api) != 0 {
+		t.Errorf("dry run sent %d write(s) and %v lookup(s), want none", api.posts, api.lookups)
 	}
 }
