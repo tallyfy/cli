@@ -223,6 +223,11 @@ type Folder struct {
 	CreatedAt string  `json:"created_at"`
 }
 
+// Domain is a company email domain an organization has claimed.
+type Domain struct {
+	Name string `json:"name"`
+}
+
 // Tag labels blueprints and processes.
 type Tag struct {
 	ID    string `json:"id"`

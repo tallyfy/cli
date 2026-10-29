@@ -317,15 +317,12 @@ type importResult struct {
 // at the source template's step.
 func runBlueprintImport(cctx context.Context, ctx *Context, org string, plan *importPlan) (*importResult, error) {
 	// Done before anything is created, so a failed lookup leaves nothing behind.
-	if plan.checksAssignees(org) {
-		users, groups, err := targetMembers(cctx, ctx, org)
+	if c := plan.checks(org); c.needed() {
+		t, err := readTargetOrg(cctx, ctx, org, c)
 		if err != nil {
-			return nil, fmt.Errorf("check which step assignees belong to org %s: %w", org, err)
+			return nil, fmt.Errorf("check the %s against org %s before creating anything: %w", c.describe(), org, err)
 		}
-		if dropped := dropForeignAssignees(plan, users, groups); len(dropped) > 0 {
-			ctx.Infof("warning: %s, so the import leaves off %d assignee(s) that are not in org %s: %s\n",
-				plan.sourceDescription(), len(dropped), org, strings.Join(dropped, ", "))
-		}
+		leaveOffRefused(ctx, plan, org, t)
 	}
 
 	payload, err := json.Marshal(plan.template)
@@ -498,22 +495,60 @@ func withExportOrg(raw json.RawMessage, org string) json.RawMessage {
 	return b.Bytes()
 }
 
-// checksAssignees reports whether the import must check step assignees
-// against the target org. api-v2 refuses a step whose users or groups are
-// not in the org (CreateStepRequest: org_user, org_group), so an import into
-// another org would stop at the first assigned step. Into the same org the
-// assignees are kept as they are (owner decision, tallyfy/work-queue#4280).
-// A file that does not say where it came from is checked.
-func (p *importPlan) checksAssignees(org string) bool {
+// importChecks says what an import must check against the org it imports
+// into before it creates anything. api-v2 answers 422 to a blueprint or step
+// naming a user or group the org does not have (org_user, org_group), to a
+// default tag the org does not have (CreateChecklistRequest), and to a step
+// guest the org would not take as a guest (ValidGuestEmail). Into the org the
+// file was exported from, everything is kept as exported and nothing is
+// checked (owner decision, tallyfy/work-queue#4280). A file that does not say
+// where it came from is checked.
+type importChecks struct {
+	users  bool // the blueprint or a step names users
+	groups bool // the blueprint or a step names groups
+	tag    bool // the blueprint has a default tag
+	guests bool // a step has guests
+}
+
+func (c importChecks) needed() bool { return c.users || c.groups || c.tag || c.guests }
+
+// describe names what will be checked, for the dry run.
+func (c importChecks) describe() string {
+	var parts []string
+	switch {
+	case c.users && c.groups:
+		parts = append(parts, "assigned users and groups")
+	case c.users:
+		parts = append(parts, "assigned users")
+	case c.groups:
+		parts = append(parts, "assigned groups")
+	}
+	if c.tag {
+		parts = append(parts, "default tag")
+	}
+	if c.guests {
+		parts = append(parts, "step guests")
+	}
+	if len(parts) < 2 {
+		return strings.Join(parts, "")
+	}
+	return strings.Join(parts[:len(parts)-1], ", ") + " and " + parts[len(parts)-1]
+}
+
+func (p *importPlan) checks(org string) importChecks {
+	var c importChecks
 	if p.sourceOrg != "" && p.sourceOrg == org {
-		return false
+		return c
 	}
+	c.users = len(stepIDs(p.template["users"])) > 0
+	c.groups = len(stepIDs(p.template["groups"])) > 0
+	c.tag = idKey(p.template["default_tag"]) != ""
 	for _, s := range p.steps {
-		if len(stepIDs(s.body["assignees"])) > 0 || len(stepIDs(s.body["groups"])) > 0 {
-			return true
-		}
+		c.users = c.users || len(stepIDs(s.body["assignees"])) > 0
+		c.groups = c.groups || len(stepIDs(s.body["groups"])) > 0
+		c.guests = c.guests || len(guestEmails(s.body["guests"])) > 0
 	}
-	return false
+	return c
 }
 
 func (p *importPlan) sourceDescription() string {
@@ -523,8 +558,8 @@ func (p *importPlan) sourceDescription() string {
 	return "the file was exported from org " + p.sourceOrg
 }
 
-// stepIDs reads a step's assignees or groups: an array of user ids (numbers)
-// or group ids (strings), normalized to strings.
+// stepIDs reads a list of user ids (numbers) or group ids (strings),
+// normalized to strings.
 func stepIDs(raw json.RawMessage) []string {
 	var items []json.RawMessage
 	if json.Unmarshal(raw, &items) != nil {
@@ -539,41 +574,150 @@ func stepIDs(raw json.RawMessage) []string {
 	return ids
 }
 
-// targetMembers lists the target org's member user ids and group ids. The
-// members list and api-v2's org_user rule both read organizations_users rows
-// that were not removed, so a user on the list is one a step can be assigned.
-func targetMembers(cctx context.Context, ctx *Context, org string) (users, groups map[string]bool, err error) {
-	us, _, err := ctx.API.ListUsers(cctx, org, tallyfy.ListOptions{All: true})
-	if err != nil {
-		return nil, nil, err
+// guestEmails reads a step's guests, an array of email addresses.
+func guestEmails(raw json.RawMessage) []string {
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return nil
 	}
-	gs, _, err := ctx.API.ListGroups(cctx, org, tallyfy.ListOptions{All: true})
-	if err != nil {
-		return nil, nil, err
+	emails := make([]string, 0, len(items))
+	for _, it := range items {
+		var e string
+		if json.Unmarshal(it, &e) == nil && e != "" {
+			emails = append(emails, e)
+		}
 	}
-	users = make(map[string]bool, len(us))
-	for _, u := range us {
-		users[u.ID.String()] = true
-	}
-	groups = make(map[string]bool, len(gs))
-	for _, g := range gs {
-		groups[g.ID] = true
-	}
-	return users, groups, nil
+	return emails
 }
 
-// dropForeignAssignees removes from every step the users and groups that are
-// not members of the target org, and names each one it removed.
+// targetOrg is what the import read from the org it imports into. A set is
+// nil when the file gave no reason to read it.
+type targetOrg struct {
+	users      map[string]bool // member user ids
+	emails     map[string]bool // member email addresses, as the members list gives them
+	groups     map[string]bool // group ids
+	tags       map[string]bool // tag ids
+	guests     bool            // step guests are checked
+	ssoDomains map[string]bool // company domains, set only when single sign-on is on
+}
+
+// readTargetOrg reads only what the checks need. Each list holds what the
+// matching api-v2 rule accepts: org_user and the members list both read the
+// org's membership rows that were not removed, org_group and the groups list
+// the org's groups, and the default_tag rule any tag of the org.
+func readTargetOrg(cctx context.Context, ctx *Context, org string, c importChecks) (*targetOrg, error) {
+	t := &targetOrg{}
+	if c.users || c.guests {
+		us, _, err := ctx.API.ListUsers(cctx, org, tallyfy.ListOptions{All: true})
+		if err != nil {
+			return nil, err
+		}
+		t.users = make(map[string]bool, len(us))
+		t.emails = make(map[string]bool, len(us))
+		for _, u := range us {
+			t.users[u.ID.String()] = true
+			if u.Email != "" {
+				t.emails[u.Email] = true
+			}
+		}
+	}
+	if c.groups {
+		gs, _, err := ctx.API.ListGroups(cctx, org, tallyfy.ListOptions{All: true})
+		if err != nil {
+			return nil, err
+		}
+		t.groups = make(map[string]bool, len(gs))
+		for _, g := range gs {
+			t.groups[g.ID] = true
+		}
+	}
+	if c.tag {
+		// Without all=true the tags list leaves out the tags api-v2 makes for
+		// processes (titles starting "from:", "task:" or "step:"), and the
+		// default_tag rule accepts those too.
+		ts, _, err := ctx.API.ListTags(cctx, org, tallyfy.ListOptions{All: true, Extra: map[string]string{"all": "true"}})
+		if err != nil {
+			return nil, err
+		}
+		t.tags = make(map[string]bool, len(ts))
+		for _, tg := range ts {
+			t.tags[tg.ID] = true
+		}
+	}
+	if c.guests {
+		t.guests = true
+		_, raw, err := ctx.API.GetOrganization(cctx, org)
+		if err != nil {
+			return nil, err
+		}
+		var o struct {
+			SamlEnabled bool `json:"saml_enabled"`
+		}
+		if err := json.Unmarshal(raw, &o); err != nil {
+			return nil, fmt.Errorf("read org %s: %w", org, err)
+		}
+		if o.SamlEnabled {
+			ds, err := ctx.API.ListDomains(cctx, org)
+			if err != nil {
+				return nil, err
+			}
+			t.ssoDomains = make(map[string]bool, len(ds))
+			for _, d := range ds {
+				t.ssoDomains[d.Name] = true
+			}
+		}
+	}
+	return t, nil
+}
+
+// guestRefusal says why the org would refuse this guest email on a step, or
+// "" when it would take it. It follows api-v2's ValidGuestEmail, in its
+// order: the email is lowercased, then refused when single sign-on is on and
+// the part after the "@" is one of the org's company domains, or when it is
+// a member's email address.
+func (t *targetOrg) guestRefusal(email string) string {
+	e := strings.ToLower(email)
+	if t.ssoDomains != nil {
+		if _, domain, ok := strings.Cut(e, "@"); ok && t.ssoDomains[domain] {
+			return "single sign-on domain " + domain
+		}
+	}
+	if t.emails[e] {
+		return "already a member"
+	}
+	return ""
+}
+
+// leaveOffRefused removes from the plan what the target org would refuse,
+// and prints one warning for each kind it left off.
+func leaveOffRefused(ctx *Context, plan *importPlan, org string, t *targetOrg) {
+	if dropped := dropForeignAssignees(plan, t.users, t.groups); len(dropped) > 0 {
+		ctx.Infof("warning: %s, so the import leaves off %d assignee(s) that are not in org %s: %s\n",
+			plan.sourceDescription(), len(dropped), org, strings.Join(dropped, ", "))
+	}
+	if tag := dropMissingDefaultTag(plan, t.tags); tag != "" {
+		ctx.Infof("warning: %s, so the import leaves off the default tag %s, which is not in org %s\n",
+			plan.sourceDescription(), tag, org)
+	}
+	if dropped := dropRefusedGuests(plan, t); len(dropped) > 0 {
+		ctx.Infof("warning: %s, so the import leaves off %d guest(s) that org %s would refuse: %s\n",
+			plan.sourceDescription(), len(dropped), org, strings.Join(dropped, ", "))
+	}
+}
+
+// dropForeignAssignees removes the users and groups that are not in the
+// target org, from the blueprint itself and from every step, and names each
+// one it removed. A nil set means it was not read, so nothing is removed.
 func dropForeignAssignees(plan *importPlan, users, groups map[string]bool) []string {
 	var dropped []string
-	for i := range plan.steps {
-		s := &plan.steps[i]
-		for _, f := range []struct {
-			key, kind string
-			members   map[string]bool
-		}{{"assignees", "user", users}, {"groups", "group", groups}} {
-			raw, ok := s.body[f.key]
-			if !ok {
+	type list struct {
+		key, kind string
+		members   map[string]bool
+	}
+	keep := func(body map[string]json.RawMessage, where string, lists []list) {
+		for _, f := range lists {
+			raw, ok := body[f.key]
+			if !ok || f.members == nil {
 				continue
 			}
 			var items []json.RawMessage
@@ -583,15 +727,67 @@ func dropForeignAssignees(plan *importPlan, users, groups map[string]bool) []str
 			kept := make([]json.RawMessage, 0, len(items))
 			for _, it := range items {
 				if id := idKey(it); id != "" && !f.members[id] {
-					dropped = append(dropped, fmt.Sprintf("%s %s on step %d (%q)", f.kind, id, i+1, s.title))
+					dropped = append(dropped, fmt.Sprintf("%s %s on %s", f.kind, id, where))
 					continue
 				}
 				kept = append(kept, it)
 			}
 			if len(kept) != len(items) {
 				b, _ := json.Marshal(kept)
-				s.body[f.key] = b
+				body[f.key] = b
 			}
+		}
+	}
+	keep(plan.template, "the blueprint", []list{{"users", "user", users}, {"groups", "group", groups}})
+	for i := range plan.steps {
+		s := &plan.steps[i]
+		keep(s.body, fmt.Sprintf("step %d (%q)", i+1, s.title), []list{{"assignees", "user", users}, {"groups", "group", groups}})
+	}
+	return dropped
+}
+
+// dropMissingDefaultTag removes the blueprint's default tag when the target
+// org does not have it, and returns the tag id it removed.
+func dropMissingDefaultTag(plan *importPlan, tags map[string]bool) string {
+	id := idKey(plan.template["default_tag"])
+	if id == "" || tags == nil || tags[id] {
+		return ""
+	}
+	delete(plan.template, "default_tag")
+	return id
+}
+
+// dropRefusedGuests removes from every step the guests the target org would
+// refuse, and names each one with the reason.
+func dropRefusedGuests(plan *importPlan, t *targetOrg) []string {
+	if !t.guests {
+		return nil
+	}
+	var dropped []string
+	for i := range plan.steps {
+		s := &plan.steps[i]
+		raw, ok := s.body["guests"]
+		if !ok {
+			continue
+		}
+		var items []json.RawMessage
+		if json.Unmarshal(raw, &items) != nil {
+			continue
+		}
+		kept := make([]json.RawMessage, 0, len(items))
+		for _, it := range items {
+			var email string
+			if json.Unmarshal(it, &email) == nil && email != "" {
+				if why := t.guestRefusal(email); why != "" {
+					dropped = append(dropped, fmt.Sprintf("guest %s on step %d (%q) (%s)", email, i+1, s.title, why))
+					continue
+				}
+			}
+			kept = append(kept, it)
+		}
+		if len(kept) != len(items) {
+			b, _ := json.Marshal(kept)
+			s.body["guests"] = b
 		}
 	}
 	return dropped

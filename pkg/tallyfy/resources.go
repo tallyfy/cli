@@ -84,6 +84,21 @@ func (c *Client) MyOrganizations(ctx context.Context, o ListOptions) ([]Organiza
 	return CollectAll[Organization](ctx, c, "me/organizations", o)
 }
 
+// GetOrganization fetches one organization the user is an active member of,
+// returning the typed model and the raw "data" JSON, which carries fields the
+// model leaves out (saml_enabled, for one). GET /organizations/{org}
+func (c *Client) GetOrganization(ctx context.Context, org string) (*Organization, json.RawMessage, error) {
+	return doItem[Organization](ctx, c, http.MethodGet, orgPath(org), nil, nil)
+}
+
+// ListDomains lists the organization's company email domains, the ones its
+// single sign-on applies to. Any member may read them, and the route is not
+// paginated. GET /organizations/{org}/domains
+func (c *Client) ListDomains(ctx context.Context, org string) ([]Domain, error) {
+	ds, _, err := CollectAll[Domain](ctx, c, orgPath(org, "domains"), ListOptions{All: true})
+	return ds, err
+}
+
 // --- blueprints (API name: checklists) ---------------------------------------
 
 // ListBlueprints lists workflow templates. GET /organizations/{org}/checklists

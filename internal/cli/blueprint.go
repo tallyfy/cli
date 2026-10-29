@@ -361,11 +361,19 @@ counts from another step at the new copy of that step. If a request fails
 part way, the error names the blueprint that was created so you can delete it.
 Automations are not re-created yet; the import warns when the file has any.
 
-Step assignees (users and groups) are kept when the file was exported from
-the org you import into. Otherwise the import checks them against that org's
-members and groups first, leaves off any that are not in it, and prints one
-warning naming them, so a promotion into another org does not stop at the
-first assigned step.`,
+When the file was exported from the org you import into, everything is kept
+as exported. Otherwise the import checks the file against that org before it
+creates anything, and leaves off what the org would refuse, with one warning
+for each kind naming every one it left off:
+  - users and groups assigned to the blueprint or to a step that are not
+    members or groups of that org
+  - the blueprint's default tag, when that org does not have it
+  - step guests whose email belongs to a member of that org, or is at a
+    company domain of that org while it has single sign-on turned on
+So a promotion into another org does not stop part way on any of these. Two
+rare cases are not visible to the import and can still stop it at a step: a
+guest email that belongs to a bot user, and one whose membership row in that
+org was deleted.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, org, err := blueprintContext(cmd)
@@ -391,8 +399,8 @@ first assigned step.`,
 				ctx.DryRunf("POST /organizations/%s/checklists (import from %s)", org, args[0])
 				ctx.DryRunf("then %d milestone(s) (POST /organizations/%s/stages) and %d step(s) in order (POST /organizations/%s/checklists/{new id}/steps)",
 					len(plan.milestones), org, len(plan.steps), org)
-				if plan.checksAssignees(org) {
-					ctx.DryRunf("first check step assignees against the members and groups of org %s (%s), and leave off any that are not in it", org, plan.sourceDescription())
+				if c := plan.checks(org); c.needed() {
+					ctx.DryRunf("first check the %s against org %s (%s), and leave off what org %s would refuse", c.describe(), org, plan.sourceDescription(), org)
 				}
 				if len(plan.stripped) == 0 {
 					ctx.Printf("stripped system fields: (none present)\n")

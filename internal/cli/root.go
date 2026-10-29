@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -49,6 +50,15 @@ Source: https://github.com/tallyfy/cli`,
 	pf.String("base-url", "", "API base URL (default https://api.tallyfy.com)")
 	pf.Bool("verbose", false, "verbose request logging (tokens redacted)")
 	pf.Bool("no-color", false, "disable color output")
+
+	// --version prints the same line as the version command and exits 0.
+	// Setting Version turns on cobra's own --version handling. Its template
+	// is the line as one quoted constant, so nothing in it is read as
+	// template syntax. The flag is declared here so cobra does not also take
+	// -v for it.
+	root.Version = version.Version
+	root.SetVersionTemplate("{{" + strconv.Quote(versionLine()) + "}}")
+	root.Flags().Bool("version", false, "print the version line, the same as the version command, and exit")
 
 	registerCommands(root)
 	return root

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -81,6 +82,32 @@ func TestResourceMethods(t *testing.T) {
 				return nil
 			},
 			wantMethod: "GET", wantPath: "/me/organizations",
+		},
+		{
+			name: "GetOrganization", resp: itemResp(`{"id":"org1","name":"Acme","saml_enabled":true}`),
+			invoke: func(c *Client) error {
+				o, raw, err := c.GetOrganization(ctx, "org1")
+				if err != nil {
+					return err
+				}
+				if o.ID != "org1" || !strings.Contains(string(raw), `"saml_enabled":true`) {
+					return fmt.Errorf("org = %+v raw = %s", o, raw)
+				}
+				return nil
+			},
+			wantMethod: "GET", wantPath: "/organizations/org1",
+		},
+		{
+			// The route answers a bare collection, with no pagination meta.
+			name: "ListDomains", resp: `{"data":[{"id":7,"name":"acme.example","organization_id":"org1"}]}`,
+			invoke: func(c *Client) error {
+				ds, err := c.ListDomains(ctx, "org1")
+				if err == nil && (len(ds) != 1 || ds[0].Name != "acme.example") {
+					return fmt.Errorf("domains = %+v", ds)
+				}
+				return err
+			},
+			wantMethod: "GET", wantPath: "/organizations/org1/domains",
 		},
 		{
 			name: "ListBlueprints", resp: listResp(`[{"id":"b1","title":"T"}]`),
