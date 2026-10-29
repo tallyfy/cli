@@ -29,11 +29,16 @@ func init() {
 						}},
 					})
 				}
-				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "tallyfy %s (commit %s, built %s, %s/%s)\n",
-					version.Version, version.Commit, version.Date, runtime.GOOS, runtime.GOARCH)
+				_, _ = fmt.Fprint(cmd.OutOrStdout(), versionLine())
 				return nil
 			},
 		}
 		root.AddCommand(cmd)
 	})
+}
+
+// versionLine is what `tallyfy version` and `tallyfy --version` both print.
+func versionLine() string {
+	return fmt.Sprintf("tallyfy %s (commit %s, built %s, %s/%s)\n",
+		version.Version, version.Commit, version.Date, runtime.GOOS, runtime.GOARCH)
 }

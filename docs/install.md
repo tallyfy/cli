@@ -78,4 +78,4 @@ tallyfy version
 tallyfy doctor
 ```
 
-`tallyfy doctor` checks your configuration, authentication, connectivity, and permission rules, and tells you what to fix if anything is off.
+`tallyfy --version` prints the same line as `tallyfy version`. `tallyfy doctor` checks your configuration, authentication, connectivity, and permission rules, and tells you what to fix if anything is off.
