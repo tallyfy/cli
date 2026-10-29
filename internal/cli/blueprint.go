@@ -370,7 +370,10 @@ for each kind naming every one it left off:
   - the blueprint's default tag, when that org does not have it
   - step guests whose email belongs to a member of that org, or is at a
     company domain of that org while it has single sign-on turned on
-So a promotion into another org does not stop part way.`,
+So a promotion into another org does not stop part way on any of these. Two
+rare cases are not visible to the import and can still stop it at a step: a
+guest email that belongs to a bot user, and one whose membership row in that
+org was deleted.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx, org, err := blueprintContext(cmd)

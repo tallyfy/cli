@@ -1215,6 +1215,40 @@ func TestBlueprintImportOtherOrgTemplateAssignees(t *testing.T) {
 	}
 }
 
+// The blueprint's own users and groups start the lookup by themselves: no
+// step names anyone here, and the import must still read the members and
+// groups lists and leave off what the org lacks. Adapted from the reviewer's
+// probe on tallyfy/cli#22; without it, dropping the two template lines in
+// checks() went unnoticed.
+func TestBlueprintImportOtherOrgTemplateOnlyAssignees(t *testing.T) {
+	api, srv := newImportAPI(t)
+	setMembers(api, []string{"123"}, nil)
+	path := assigneesFixtureWith(t, "org_source", func(bp map[string]any, steps []map[string]any) {
+		clearAssignees(steps)
+		bp["users"] = []any{123, 456}
+		bp["groups"] = []any{"grp_source_1"}
+	})
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", path, "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0 (the import completes); stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	id := importedID(t, res.stdout)
+	if got := templateField(t, api, id, "users"); got != "[123]" {
+		t.Errorf("blueprint users = %s, want [123]", got)
+	}
+	if got := templateField(t, api, id, "groups"); got != "[]" {
+		t.Errorf("blueprint groups = %s, want []", got)
+	}
+	if !strings.Contains(res.stderr, "leaves off 2 assignee(s) that are not in org org_test: user 456 on the blueprint, group grp_source_1 on the blueprint") {
+		t.Errorf("warning should name user 456 and group grp_source_1 on the blueprint:\n%s", res.stderr)
+	}
+	if api.lookups["users"] != 1 || api.lookups["groups"] != 1 {
+		t.Errorf("lookups = %v, want the members and groups lists once each", api.lookups)
+	}
+}
+
 // The blueprint's default tag must be one of the org's tags. When it is not,
 // the import leaves it off and says so. Process tags count as tags, so the
 // lookup must ask for them too.
