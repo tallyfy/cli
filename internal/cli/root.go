@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -52,13 +51,26 @@ Source: https://github.com/tallyfy/cli`,
 	pf.Bool("no-color", false, "disable color output")
 
 	// --version prints the same line as the version command and exits 0.
-	// Setting Version turns on cobra's own --version handling. Its template
-	// is the line as one quoted constant, so nothing in it is read as
-	// template syntax. The flag is declared here so cobra does not also take
-	// -v for it.
-	root.Version = version.Version
-	root.SetVersionTemplate("{{" + strconv.Quote(versionLine()) + "}}")
+	// It is not cobra's Version field: cobra prints anything but its own
+	// "tallyfy version X" line through text/template, and a reachable
+	// text/template makes the linker keep every exported method, about
+	// 1.8 MB more binary (tallyfy/work-queue#4437). The root has no Run, so
+	// cobra answers a bare `tallyfy`, with or without flags, by calling its
+	// help function; that is where --version is answered. --help still wins,
+	// as it did with cobra's own flag, and the help text is unchanged.
 	root.Flags().Bool("version", false, "print the version line, the same as the version command, and exit")
+	help := root.HelpFunc()
+	root.SetHelpFunc(func(c *cobra.Command, args []string) {
+		if c == root {
+			wantHelp, _ := c.Flags().GetBool("help")
+			wantVersion, _ := c.Flags().GetBool("version")
+			if wantVersion && !wantHelp {
+				_, _ = fmt.Fprint(c.OutOrStdout(), versionLine())
+				return
+			}
+		}
+		help(c, args)
+	})
 
 	registerCommands(root)
 	return root

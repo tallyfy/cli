@@ -354,8 +354,9 @@ POST so the snapshot re-creates cleanly. Combine with --org to promote a
 blueprint into another organization (workflows-as-code).
 
 The API's template create takes no steps, so the import creates the template
-with its kick-off fields, then its milestones, then each step in the file's
-order with its form fields,
+with its kick-off fields, saves the blueprint's own users and groups with a
+template edit (the create checks them but does not save them), then creates
+its milestones, then each step in the file's order with its form fields,
 puts each step back under its milestone, and re-points any deadline that
 counts from another step at the new copy of that step. If a request fails
 part way, the error names the blueprint that was created so you can delete it.
@@ -397,6 +398,9 @@ org was deleted.`,
 			}
 			if ctx.DryRun {
 				ctx.DryRunf("POST /organizations/%s/checklists (import from %s)", org, args[0])
+				if plan.hasTemplateAssignees() {
+					ctx.DryRunf("then save the blueprint's own users and groups, which the create does not save (PUT /organizations/%s/checklists/{new id})", org)
+				}
 				ctx.DryRunf("then %d milestone(s) (POST /organizations/%s/stages) and %d step(s) in order (POST /organizations/%s/checklists/{new id}/steps)",
 					len(plan.milestones), org, len(plan.steps), org)
 				if c := plan.checks(org); c.needed() {
