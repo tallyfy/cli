@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +68,12 @@ type importAPI struct {
 	lookups     map[string]int    // GETs per lookup route: users, groups, tags, org, domains
 	lookupQuery map[string]string // the last query string each lookup route got
 	failLookup  string            // a lookup route that answers 500
+
+	// Template edits (PUT checklists/{id}): how many, the last body, and
+	// whether the test wants them refused.
+	templateEdits    int
+	lastTemplateEdit map[string]any
+	failTemplateEdit bool
 }
 
 type fakeTemplate struct {
@@ -162,6 +169,8 @@ func (a *importAPI) handle(w http.ResponseWriter, r *http.Request) {
 		a.createStage(w, body)
 	case r.Method == http.MethodPut && len(parts) == 5 && parts[0] == "checklists" && parts[2] == "steps" && parts[4] == "link-stage":
 		a.linkStage(w, parts[1], parts[3], body)
+	case r.Method == http.MethodPut && len(parts) == 2 && parts[0] == "checklists":
+		a.updateTemplate(w, parts[1], body)
 	case r.Method == http.MethodPut && len(parts) == 4 && parts[0] == "checklists" && parts[2] == "steps":
 		a.updateStep(w, parts[1], parts[3], body)
 	default:
@@ -365,6 +374,11 @@ func (a *importAPI) createTemplate(w http.ResponseWriter, body map[string]any) {
 		}
 	}
 	tpl.fields["prerun"] = kept
+	// The create checks users and groups but does not save them:
+	// Checklist::build keeps only its fillable fields, which leave both out,
+	// so the new template reads back with empty lists (measured on staging
+	// 2026-10-29, tallyfy/work-queue#4436).
+	tpl.fields["users"], tpl.fields["groups"] = []any{}, []any{}
 	a.templates[tpl.id] = tpl
 	b, _ := json.Marshal(map[string]any{"data": map[string]any{"id": tpl.id, "title": body["title"], "status": "started", "steps_count": 0}})
 	writeJSON(w, 201, string(b))
@@ -385,6 +399,41 @@ func (a *importAPI) refusedAssignee(body map[string]any, key string) string {
 		}
 	}
 	return ""
+}
+
+// updateTemplate mirrors api-v2's template edit: UpdateChecklistRequest
+// needs a title and checks users and groups (org_user, org_group), and the
+// edit is partial, so a field the body leaves out keeps its value
+// (Checklist::editChecklist, AssignableTrait::assigneesFromPartial). It
+// answers the template as GET does.
+func (a *importAPI) updateTemplate(w http.ResponseWriter, id string, body map[string]any) {
+	a.templateEdits++
+	a.lastTemplateEdit = body
+	tpl, ok := a.templates[id]
+	if !ok {
+		writeJSON(w, 404, `{"error":true,"message":"template not found"}`)
+		return
+	}
+	if t, _ := body["title"].(string); t == "" {
+		fail422(w, "The title field is required.")
+		return
+	}
+	for _, key := range []string{"users", "groups"} {
+		if msg := a.refusedAssignee(body, key); msg != "" {
+			fail422(w, msg)
+			return
+		}
+	}
+	if a.failTemplateEdit {
+		fail422(w, "edit refused by the test")
+		return
+	}
+	for k, v := range body {
+		tpl.fields[k] = v
+	}
+	b, _ := json.Marshal(map[string]any{"data": map[string]any{"id": tpl.id, "title": tpl.fields["title"], "status": "started",
+		"users": tpl.fields["users"], "groups": tpl.fields["groups"]}})
+	writeJSON(w, 200, string(b))
 }
 
 func (a *importAPI) validDeadline(d any) (map[string]any, bool) {
@@ -1533,5 +1582,166 @@ func TestBlueprintImportDryRunSaysWhatItChecks(t *testing.T) {
 	defer api.mu.Unlock()
 	if api.posts != 0 || totalLookups(api) != 0 {
 		t.Errorf("dry run sent %d write(s) and %v lookup(s), want none", api.posts, api.lookups)
+	}
+}
+
+// --- the blueprint's own users and groups (tallyfy/work-queue#4436) -------
+
+// testdata/blueprint-export-template-assignees.json is the export the v0.1.4
+// release check made on staging on 2026-10-29 (tallyfy/work-queue#4436): a
+// 2 step template whose own users are a member of both test orgs (123 here)
+// and a member of the source org only (456), with a source org group, a
+// default tag, two guests on step 1 and user 123 on step 2. The template
+// had been given its users and groups with a template edit, because the
+// create does not save them. Org, user, group and tag ids and the guest
+// emails are replaced.
+func templateAssigneesFixture(t *testing.T, sourceOrg string) string {
+	t.Helper()
+	var obj map[string]any
+	if err := json.Unmarshal(readFixture(t, "blueprint-export-template-assignees.json"), &obj); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(obj["users"]) != "[123 456]" || fmt.Sprint(obj["groups"]) != "[grp_source_1]" || obj["exported_from_org"] != "org_source" {
+		t.Fatalf("fixture lost what this test is for: users %v groups %v from %v", obj["users"], obj["groups"], obj["exported_from_org"])
+	}
+	obj["exported_from_org"] = sourceOrg
+	path := filepath.Join(t.TempDir(), "template-assignees.json")
+	b, _ := json.Marshal(obj)
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// api-v2's template create checks the blueprint's users and groups but does
+// not save them, so the import saves them with a template edit right after
+// the create: every one for a same-org import, and what the target org has
+// for a cross-org import. The edit names only the title and the lists it
+// sets. With nothing to save, no edit is sent.
+func TestBlueprintImportSavesTemplateAssignees(t *testing.T) {
+	for _, tc := range []struct {
+		name, source string
+		members      []string
+		groups       []string
+		wantUsers    string
+		wantGroups   string
+		wantEdit     []string // the keys the edit sent; nil means no edit
+		warning      string
+	}{
+		{"same org", "org_test", []string{"123", "456"}, []string{"grp_source_1"},
+			"[123,456]", `["grp_source_1"]`, []string{"groups", "title", "users"}, ""},
+		{"another org that has user 123", "org_source", []string{"123"}, nil,
+			"[123]", "[]", []string{"title", "users"},
+			"leaves off 2 assignee(s) that are not in org org_test: user 456 on the blueprint, group grp_source_1 on the blueprint"},
+		{"another org that has none of them", "org_source", []string{"999"}, nil,
+			"[]", "[]", nil, "user 123 on the blueprint, user 456 on the blueprint, group grp_source_1 on the blueprint"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, srv := newImportAPI(t)
+			setMembers(api, tc.members, tc.groups)
+			configure(api, func(a *importAPI) { a.tags["tag_source_1"] = "source" })
+			res := run(t, srv.URL, "", "--yes", "blueprint", "import", templateAssigneesFixture(t, tc.source), "-o", "json")
+			if res.code != 0 {
+				t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+			}
+			api.mu.Lock()
+			defer api.mu.Unlock()
+			id := importedID(t, res.stdout)
+			if got := templateField(t, api, id, "users"); got != tc.wantUsers {
+				t.Errorf("blueprint users = %s, want %s", got, tc.wantUsers)
+			}
+			if got := templateField(t, api, id, "groups"); got != tc.wantGroups {
+				t.Errorf("blueprint groups = %s, want %s", got, tc.wantGroups)
+			}
+			if n := len(api.templates[id].steps); n != 2 {
+				t.Errorf("steps = %d, want 2", n)
+			}
+			if tc.wantEdit == nil {
+				if api.templateEdits != 0 {
+					t.Errorf("template edits = %d, want 0 with nothing to save: %v", api.templateEdits, api.lastTemplateEdit)
+				}
+			} else {
+				keys := make([]string, 0, len(api.lastTemplateEdit))
+				for k := range api.lastTemplateEdit {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				if api.templateEdits != 1 || !reflect.DeepEqual(keys, tc.wantEdit) {
+					t.Errorf("template edits = %d with keys %v, want 1 with %v", api.templateEdits, keys, tc.wantEdit)
+				}
+				if api.lastTemplateEdit["title"] != "wq4280-cli-check-20261029T190317Z-5b88b7" {
+					t.Errorf("edit title = %v, want the blueprint's own title, so the kick-off title is left alone", api.lastTemplateEdit["title"])
+				}
+			}
+			if tc.warning != "" && !strings.Contains(res.stderr, tc.warning) {
+				t.Errorf("warning missing %q:\n%s", tc.warning, res.stderr)
+			}
+		})
+	}
+}
+
+// A file whose blueprint has no users or groups sends no template edit.
+func TestBlueprintImportNoTemplateAssigneesNoEdit(t *testing.T) {
+	api, srv := newImportAPI(t)
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", filepath.Join("testdata", "blueprint-export-milestone.json"), "-o", "json")
+	if res.code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%s", res.code, res.stderr)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.templateEdits != 0 {
+		t.Errorf("template edits = %d, want 0: %v", api.templateEdits, api.lastTemplateEdit)
+	}
+}
+
+// A refused template edit stops the import before any step, keeps the API's
+// exit code, and names the blueprint that was created so it can be deleted.
+func TestBlueprintImportTemplateEditFailureNamesBlueprint(t *testing.T) {
+	api, srv := newImportAPI(t)
+	setMembers(api, []string{"123", "456"}, []string{"grp_source_1"})
+	configure(api, func(a *importAPI) {
+		a.tags["tag_source_1"] = "source"
+		a.failTemplateEdit = true
+	})
+	res := run(t, srv.URL, "", "--yes", "blueprint", "import", templateAssigneesFixture(t, "org_test"))
+	if res.code != 7 {
+		t.Fatalf("exit = %d, want 7 (validation); stderr=%s", res.code, res.stderr)
+	}
+	for _, want := range []string{"blueprint bp_imp_1 was created, but the import stopped at saving the blueprint's own users and groups",
+		"edit refused by the test", "tallyfy blueprint delete bp_imp_1"} {
+		if !strings.Contains(res.stderr, want) {
+			t.Errorf("stderr missing %q:\n%s", want, res.stderr)
+		}
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.templateEdits != 1 {
+		t.Errorf("template edits = %d, want 1", api.templateEdits)
+	}
+	if n := len(api.templates["bp_imp_1"].steps); n != 0 {
+		t.Errorf("steps created = %d, want 0 after the refused edit", n)
+	}
+}
+
+// The dry run says it will save the blueprint's own users and groups, and
+// only when the file has some.
+func TestBlueprintImportDryRunSavesTemplateAssignees(t *testing.T) {
+	api, srv := newImportAPI(t)
+	const line = "[dry-run] then save the blueprint's own users and groups, which the create does not save (PUT /organizations/org_test/checklists/{new id})\n"
+	with := run(t, srv.URL, "", "blueprint", "import", templateAssigneesFixture(t, "org_test"), "--dry-run")
+	without := run(t, srv.URL, "", "blueprint", "import", filepath.Join("testdata", "blueprint-export-milestone.json"), "--dry-run")
+	if with.code != 0 || without.code != 0 {
+		t.Fatalf("exit = %d and %d, want 0; stderr=%s %s", with.code, without.code, with.stderr, without.stderr)
+	}
+	if !strings.Contains(with.stdout, line) {
+		t.Errorf("dry run missing\n%s\ngot:\n%s", line, with.stdout)
+	}
+	if strings.Contains(without.stdout, "own users and groups") {
+		t.Errorf("a file with no blueprint users or groups should not mention them:\n%s", without.stdout)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.posts != 0 {
+		t.Errorf("dry run sent %d write(s), want 0", api.posts)
 	}
 }

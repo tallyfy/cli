@@ -338,6 +338,16 @@ func runBlueprintImport(cctx context.Context, ctx *Context, org string, plan *im
 		return res, &importIncompleteError{blueprintID: b.ID, stage: stage, err: err}
 	}
 
+	title := b.Title
+	if title == "" {
+		_ = json.Unmarshal(plan.template["title"], &title)
+	}
+	if edit := plan.templateAssigneesEdit(title); edit != nil {
+		if _, err := ctx.API.UpdateBlueprint(cctx, org, b.ID, edit); err != nil {
+			return fail("saving the blueprint's own users and groups", err)
+		}
+	}
+
 	newMilestone := map[string]json.Number{}
 	for i, m := range plan.milestones {
 		data, err := ctx.API.CreateBlueprintMilestone(cctx, org, b.ID, m.title, m.position)
@@ -441,6 +451,38 @@ func runBlueprintImport(cctx context.Context, ctx *Context, org string, plan *im
 		}
 	}
 	return res, nil
+}
+
+// templateAssigneesEdit is the template edit that saves the blueprint's own
+// users and groups, or nil when it has none. api-v2's template create checks
+// them (org_user, org_group) but does not save them, because
+// Checklist::build keeps only its fillable fields; only a template edit saves
+// them (ChecklistService::editChecklist calls saveAssignees). The create
+// still carries them, so one the org would refuse fails there, before
+// anything exists. The edit is partial: it needs the title, and leaves every
+// field it does not name as it is (Checklist::editChecklist fills only what
+// it is sent; assigneesFromPartial keeps a list the body leaves out). An
+// unchanged title leaves the kick-off title alone. The lists are what the
+// cross-org checks kept (tallyfy/work-queue#4436).
+func (p *importPlan) templateAssigneesEdit(title string) json.RawMessage {
+	body := map[string]json.RawMessage{}
+	for _, k := range []string{"users", "groups"} {
+		if len(stepIDs(p.template[k])) > 0 {
+			body[k] = p.template[k]
+		}
+	}
+	if len(body) == 0 {
+		return nil
+	}
+	body["title"], _ = json.Marshal(title)
+	b, _ := json.Marshal(body)
+	return b
+}
+
+// hasTemplateAssignees reports whether the file gives the blueprint itself
+// any users or groups, for the dry run.
+func (p *importPlan) hasTemplateAssignees() bool {
+	return len(stepIDs(p.template["users"])) > 0 || len(stepIDs(p.template["groups"])) > 0
 }
 
 // repointDeadline copies a deadline with its anchor step replaced.
