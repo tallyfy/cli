@@ -7,9 +7,9 @@ import (
 	"github.com/tallyfy/cli/internal/version"
 )
 
-// The --version line goes through cobra's template engine, so it is passed
-// as one quoted constant. A version string with template syntax in it must
-// still print as is, the same as the version command prints it.
+// --version prints the version line itself, the same as the version command
+// prints it. A version string with template syntax in it must still print as
+// is (tallyfy/work-queue#4437 moved it off cobra's version template).
 func TestVersionFlagPrintsTheVersionLineAsIs(t *testing.T) {
 	old := version.Version
 	t.Cleanup(func() { version.Version = old })
